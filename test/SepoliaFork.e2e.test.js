@@ -53,8 +53,9 @@ function fastConfig() {
 }
 
 async function deployForkFixture() {
-  const [owner, treasury, requester, alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy] = await ethers.getSigners();
-  const reviewerSigners = [alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy];
+  const signers = await ethers.getSigners();
+  const [owner, treasury, requester] = signers;
+  const reviewerSigners = signers.slice(3);
 
   const USDAIO = await ethers.getContractFactory("USDAIOToken");
   const usdaio = await USDAIO.deploy(owner.address);
@@ -301,7 +302,6 @@ describeFork("Sepolia fork E2E", function () {
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await core.finalizeRequest(requestId);
 
     const result = await core.getRequestFinalResult(requestId);
     expect(result.status).to.equal(FINALIZED);

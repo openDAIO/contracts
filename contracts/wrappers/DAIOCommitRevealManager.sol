@@ -5,6 +5,7 @@ pragma experimental ABIEncoderV2;
 import "../../lib/hash-contract/contracts/CommitReveal.sol";
 
 interface IDAIOCommitSink {
+    function syncRequest(uint256 requestId) external returns (uint8 status);
     function submitReviewCommitFor(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) external;
     function revealReviewFor(
         address reviewer,
@@ -21,6 +22,11 @@ interface IDAIOCommitSink {
 }
 
 contract DAIOCommitRevealManager is CommitReveal {
+    uint8 internal constant REVIEW_COMMIT = 2;
+    uint8 internal constant REVIEW_REVEAL = 3;
+    uint8 internal constant AUDIT_COMMIT = 4;
+    uint8 internal constant AUDIT_REVEAL = 5;
+
     address public owner;
     address public core;
 
@@ -51,6 +57,7 @@ contract DAIOCommitRevealManager is CommitReveal {
 
     function commitReview(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4] calldata vrfProof) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
+        if (IDAIOCommitSink(core).syncRequest(requestId) != REVIEW_COMMIT) return;
         commit_hashed(resultHash, seed, IDAIOCommitSink(core).reviewCommitRound(requestId));
         IDAIOCommitSink(core).submitReviewCommitFor(msg.sender, requestId, vrfProof);
     }
@@ -82,17 +89,20 @@ contract DAIOCommitRevealManager is CommitReveal {
         uint256 seed
     ) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
+        if (IDAIOCommitSink(core).syncRequest(requestId) != REVIEW_REVEAL) return;
         IDAIOCommitSink(core).revealReviewFor(msg.sender, requestId, proposalScore, reportHash, reportURI, seed);
     }
 
     function commitAudit(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4][] calldata targetProofs) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
+        if (IDAIOCommitSink(core).syncRequest(requestId) != AUDIT_COMMIT) return;
         commit_hashed(resultHash, seed, IDAIOCommitSink(core).auditCommitRound(requestId));
         IDAIOCommitSink(core).submitAuditCommitFor(msg.sender, requestId, targetProofs);
     }
 
     function revealAudit(uint256 requestId, address[] calldata targets, uint16[] calldata scores, uint256 seed) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
+        if (IDAIOCommitSink(core).syncRequest(requestId) != AUDIT_REVEAL) return;
         IDAIOCommitSink(core).revealAuditFor(msg.sender, requestId, targets, scores, seed);
     }
 }

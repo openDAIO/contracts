@@ -509,9 +509,12 @@ contract DAIOCore {
         _submitReviewCommit(reviewer, requestId, vrfProof);
     }
 
+    function syncRequest(uint256 requestId) external nonReentrant returns (uint8 status) {
+        return uint8(_syncRequest(requestId));
+    }
+
     function _submitReviewCommit(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) internal {
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewCommit);
-        if (_isTimedOut(request_)) revert PhaseTimedOut();
         if (!_eligibleForRequest(reviewer, request_.domainMask)) revert IneligibleReviewer();
 
         bytes32 commitHash = commitReveal.saved_commits(reviewCommitRound(requestId), reviewer);
@@ -555,7 +558,6 @@ contract DAIOCore {
     ) external {
         if (msg.sender != address(commitReveal)) revert InvalidAddress();
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewReveal);
-        if (_isTimedOut(request_)) revert PhaseTimedOut();
 
         ReviewSubmission storage submission = reviewSubmissions[requestId][reviewer];
         if (!submission.committed) revert IneligibleReviewer();
@@ -599,7 +601,6 @@ contract DAIOCore {
 
     function _submitAuditCommit(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) internal {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditCommit);
-        if (_isTimedOut(request_)) revert PhaseTimedOut();
         if (!reviewSubmissions[requestId][auditor].revealed) revert IneligibleReviewer();
 
         bytes32 commitHash = commitReveal.saved_commits(auditCommitRound(requestId), auditor);
@@ -661,7 +662,6 @@ contract DAIOCore {
     ) external {
         if (msg.sender != address(commitReveal)) revert InvalidAddress();
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditReveal);
-        if (_isTimedOut(request_)) revert PhaseTimedOut();
         if (targets.length == 0 || targets.length != scores.length || targets.length > request_.config.auditTargetLimit) revert InvalidAuditTarget();
 
         AuditSubmission storage submission = auditSubmissions[requestId][auditor];
@@ -713,11 +713,29 @@ contract DAIOCore {
         request_.auditRevealCount++;
 
         emit AuditRevealed(requestId, auditor, targets.length);
+
+        if (request_.auditRevealCount >= request_.config.auditRevealQuorum) {
+            _finalize(requestId);
+        }
     }
 
     function handleTimeout(uint256 requestId) external nonReentrant {
+        if (!_applyTimeoutIfNeeded(requestId)) revert TooEarly();
+    }
+
+    function _syncRequest(uint256 requestId) internal returns (RequestStatus status) {
+        if (_applyTimeoutIfNeeded(requestId)) return requests[requestId].status;
+
         Request storage request_ = _requireRequest(requestId);
-        if (!_isTimedOut(request_)) revert TooEarly();
+        if (request_.status == RequestStatus.AuditReveal && request_.auditRevealCount >= request_.config.auditRevealQuorum) {
+            _finalize(requestId);
+        }
+        return requests[requestId].status;
+    }
+
+    function _applyTimeoutIfNeeded(uint256 requestId) internal returns (bool applied) {
+        Request storage request_ = _requireRequest(requestId);
+        if (!_isTimedOut(request_)) return false;
 
         if (request_.status == RequestStatus.ReviewCommit) {
             if (_canRetry(request_)) {
@@ -725,7 +743,7 @@ contract DAIOCore {
             } else {
                 _cancelAndRefund(requestId);
             }
-            return;
+            return true;
         }
 
         if (request_.status == RequestStatus.ReviewReveal) {
@@ -739,7 +757,7 @@ contract DAIOCore {
                 request_.lowConfidence = true;
                 _advance(requestId, RequestStatus.AuditCommit);
             }
-            return;
+            return true;
         }
 
         if (request_.status == RequestStatus.AuditCommit) {
@@ -751,7 +769,7 @@ contract DAIOCore {
                 request_.lowConfidence = true;
                 _advance(requestId, RequestStatus.AuditReveal);
             }
-            return;
+            return true;
         }
 
         if (request_.status == RequestStatus.AuditReveal) {
@@ -762,10 +780,10 @@ contract DAIOCore {
                 request_.lowConfidence = true;
                 _finalize(requestId);
             }
-            return;
+            return true;
         }
 
-        revert TooEarly();
+        return false;
     }
 
     function finalizeRequest(uint256 requestId) external nonReentrant {

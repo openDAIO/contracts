@@ -70,8 +70,10 @@ function tierConfig({
 
 describe("DAIOCore", function () {
   async function deployFixture() {
-    const [owner, treasury, requester, alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy] = await ethers.getSigners();
-    const reviewerSigners = [alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy];
+    const signers = await ethers.getSigners();
+    const [owner, treasury, requester] = signers;
+    const reviewerSigners = signers.slice(3);
+    const [alice, bob, carol] = reviewerSigners;
 
     const USDAIO = await ethers.getContractFactory("USDAIOToken");
     const usdaio = await USDAIO.deploy(owner.address);
@@ -480,8 +482,6 @@ describe("DAIOCore", function () {
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
 
-    await core.finalizeRequest(requestId);
-
     const result = await core.getRequestFinalResult(requestId);
     const aliceResult = await core.getReviewerResult(requestId, alice.address);
     const bobResult = await core.getReviewerResult(requestId, bob.address);
@@ -706,7 +706,7 @@ describe("DAIOCore", function () {
 
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(ethers.parseEther("1000"));
-    await expect(reviewerRegistry.connect(alice).withdrawStake(1)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
+    await expect(reviewerRegistry.connect(alice).withdrawStake.staticCall(1)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
 
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
 
@@ -721,7 +721,6 @@ describe("DAIOCore", function () {
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await core.finalizeRequest(requestId);
 
     expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(0n);
   });
@@ -751,7 +750,6 @@ describe("DAIOCore", function () {
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await core.finalizeRequest(requestId);
 
     const result = await core.getRequestFinalResult(requestId);
     expect(result.status).to.equal(UNRESOLVED);
