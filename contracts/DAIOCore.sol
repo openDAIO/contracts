@@ -6,6 +6,26 @@ interface IERC20Like {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 }
 
+interface ICommitReveal {
+    function saved_commits(uint256 round, address participant) external view returns (bytes32);
+    function reveal_hashed(bytes32 resultHash, address participant, uint256 seed, uint256 round) external returns (bool);
+}
+
+interface IPriorityQueue {
+    function currentSize() external view returns (uint256);
+    function push(uint256 priority, bytes32 hashedValue) external;
+    function top() external view returns (uint256, bytes32);
+    function pop() external returns (uint256, bytes32);
+}
+
+interface IFRAINVRFVerifier {
+    function randomnessFromProof(
+        uint256[2] calldata publicKey,
+        uint256[4] calldata proof,
+        bytes calldata message
+    ) external view returns (bytes32);
+}
+
 contract DAIOCore {
     uint256 public constant SCALE = 10_000;
     uint256 public constant HALF_SCALE = 5_000;
@@ -15,8 +35,12 @@ contract DAIOCore {
     bytes32 public constant AUDIT_SORTITION = keccak256("DAIO_AUDIT_SORTITION");
 
     IERC20Like public immutable usdaio;
+    ICommitReveal public immutable commitReveal;
+    IPriorityQueue public immutable priorityQueue;
+    IFRAINVRFVerifier public immutable vrfVerifier;
     address public owner;
     address public treasury;
+    bytes public sortitionMessage;
 
     uint256 public baseRequestFee = 100 ether;
     uint256 public minStake = 1_000 ether;
@@ -52,6 +76,7 @@ contract DAIOCore {
         uint256 agentId;
         uint256 stake;
         uint256 domainMask;
+        uint256[2] vrfPublicKey;
         uint256 completedRequests;
         uint256 semanticStrikes;
         uint256 protocolFaults;
@@ -109,7 +134,7 @@ contract DAIOCore {
 
     struct ReviewSubmission {
         bytes32 commitHash;
-        bytes32 sortitionProof;
+        bytes32 sortitionRandomness;
         bool committed;
         bool revealed;
         bool protocolFault;
@@ -147,7 +172,6 @@ contract DAIOCore {
     mapping(uint256 requestId => mapping(address auditor => mapping(address target => bool exists))) public hasAuditScore;
     mapping(uint256 requestId => mapping(address reviewer => ReviewerResult result)) public reviewerResults;
 
-    uint256[] private _queue;
     mapping(uint256 requestId => address[] reviewers) private _reviewCommitters;
     mapping(uint256 requestId => address[] reviewers) private _revealedReviewers;
     mapping(uint256 requestId => mapping(address target => address[] auditors)) private _incomingAuditors;
@@ -203,12 +227,27 @@ contract DAIOCore {
         _locked = 1;
     }
 
-    constructor(address usdaioToken, address treasury_) {
-        if (usdaioToken == address(0) || treasury_ == address(0)) revert InvalidAddress();
+    constructor(
+        address usdaioToken,
+        address treasury_,
+        address commitReveal_,
+        address priorityQueue_,
+        address vrfVerifier_
+    ) {
+        if (
+            usdaioToken == address(0) || treasury_ == address(0) || commitReveal_ == address(0)
+                || priorityQueue_ == address(0) || vrfVerifier_ == address(0)
+        ) {
+            revert InvalidAddress();
+        }
 
         usdaio = IERC20Like(usdaioToken);
+        commitReveal = ICommitReveal(commitReveal_);
+        priorityQueue = IPriorityQueue(priorityQueue_);
+        vrfVerifier = IFRAINVRFVerifier(vrfVerifier_);
         owner = msg.sender;
         treasury = treasury_;
+        sortitionMessage = bytes("sample");
 
         tierConfigs[uint256(ServiceTier.Fast)] = RequestConfig({
             reviewElectionDifficulty: uint16(SCALE),
@@ -275,6 +314,11 @@ contract DAIOCore {
         treasury = newTreasury;
     }
 
+    function setSortitionMessage(bytes calldata newSortitionMessage) external onlyOwner {
+        if (newSortitionMessage.length == 0) revert InvalidAmount();
+        sortitionMessage = newSortitionMessage;
+    }
+
     function setEconomics(uint256 newBaseRequestFee, uint256 newMinStake, uint256 newProtocolFeeBps) external onlyOwner {
         if (newProtocolFeeBps > BPS) revert InvalidAmount();
 
@@ -293,9 +337,11 @@ contract DAIOCore {
         bytes32 ensNode,
         uint256 agentId,
         uint256 domainMask,
+        uint256[2] calldata vrfPublicKey,
         uint256 stakeAmount
     ) external nonReentrant {
         if (bytes(ensName).length == 0 || ensNode == bytes32(0) || agentId == 0 || domainMask == 0) revert InvalidAmount();
+        if (vrfPublicKey[0] == 0 || vrfPublicKey[1] == 0) revert InvalidAmount();
         if (stakeAmount == 0) revert InvalidAmount();
 
         Reviewer storage reviewer = reviewers[msg.sender];
@@ -310,6 +356,8 @@ contract DAIOCore {
         reviewer.ensName = ensName;
         reviewer.agentId = agentId;
         reviewer.domainMask = domainMask;
+        reviewer.vrfPublicKey[0] = vrfPublicKey[0];
+        reviewer.vrfPublicKey[1] = vrfPublicKey[1];
         reviewer.stake = newStake;
 
         emit ReviewerRegistered(msg.sender, agentId, ensNode, newStake, domainMask);
@@ -374,55 +422,46 @@ contract DAIOCore {
         request_.phaseStartedAt = block.timestamp;
         request_.config = config;
 
-        _queue.push(requestId);
+        priorityQueue.push(priorityFee, bytes32(requestId));
 
         emit RequestCreated(requestId, msg.sender, tier, feePaid, priorityFee);
         emit StatusChanged(requestId, RequestStatus.Queued);
     }
 
     function startNextRequest() external returns (uint256 requestId) {
-        if (_queue.length == 0) revert QueueEmpty();
-
-        uint256 bestIndex;
-        uint256 bestPriority;
-        uint256 bestId = type(uint256).max;
-        bool found;
-
-        for (uint256 i = 0; i < _queue.length; i++) {
-            uint256 candidateId = _queue[i];
-            Request storage candidate = requests[candidateId];
-            if (candidate.status != RequestStatus.Queued) continue;
-
-            if (!found || candidate.priorityFee > bestPriority || (candidate.priorityFee == bestPriority && candidateId < bestId)) {
-                found = true;
-                bestIndex = i;
-                bestPriority = candidate.priorityFee;
-                bestId = candidateId;
+        while (priorityQueue.currentSize() > 0) {
+            (, bytes32 encodedRequestId) = priorityQueue.pop();
+            uint256 candidateId = uint256(encodedRequestId);
+            if (requests[candidateId].status == RequestStatus.Queued) {
+                requestId = candidateId;
+                break;
             }
         }
 
-        if (!found) revert QueueEmpty();
-
-        requestId = bestId;
-        _queue[bestIndex] = _queue[_queue.length - 1];
-        _queue.pop();
+        if (requestId == 0) revert QueueEmpty();
 
         _advance(requestId, RequestStatus.ReviewCommit);
         emit RequestStarted(requestId);
     }
 
-    function submitReviewCommit(uint256 requestId, bytes32 commitHash, bytes32 sortitionProof) external {
+    function submitReviewCommit(uint256 requestId, uint256[4] calldata vrfProof) external {
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewCommit);
         if (_isTimedOut(request_)) revert PhaseTimedOut();
-        if (commitHash == bytes32(0)) revert BadCommitment();
         if (!_eligibleForRequest(msg.sender, request_.domainMask)) revert IneligibleReviewer();
-        if (!isReviewSelected(requestId, msg.sender, sortitionProof)) revert NotSelected();
+
+        bytes32 commitHash = commitReveal.saved_commits(reviewCommitRound(requestId), msg.sender);
+        if (commitHash == bytes32(0)) revert BadCommitment();
+
+        bytes32 randomness = _vrfRandomness(msg.sender, vrfProof);
+        if (!_passesSortition(REVIEW_SORTITION, requestId, msg.sender, address(0), randomness, request_.config.reviewElectionDifficulty)) {
+            revert NotSelected();
+        }
 
         ReviewSubmission storage submission = reviewSubmissions[requestId][msg.sender];
         if (submission.committed) revert AlreadySubmitted();
 
         submission.commitHash = commitHash;
-        submission.sortitionProof = sortitionProof;
+        submission.sortitionRandomness = randomness;
         submission.committed = true;
 
         _reviewCommitters[requestId].push(msg.sender);
@@ -440,7 +479,7 @@ contract DAIOCore {
         uint16 proposalScore,
         bytes32 reportHash,
         string calldata reportURI,
-        bytes32 salt
+        uint256 seed
     ) external {
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewReveal);
         if (_isTimedOut(request_)) revert PhaseTimedOut();
@@ -450,8 +489,8 @@ contract DAIOCore {
         if (!submission.committed) revert IneligibleReviewer();
         if (submission.revealed) revert AlreadySubmitted();
 
-        bytes32 expected = keccak256(abi.encode(requestId, msg.sender, proposalScore, reportHash, keccak256(bytes(reportURI)), salt));
-        if (expected != submission.commitHash) revert BadCommitment();
+        bytes32 resultHash = hashReviewReveal(requestId, msg.sender, proposalScore, reportHash, reportURI);
+        if (!commitReveal.reveal_hashed(resultHash, msg.sender, seed, reviewCommitRound(requestId))) revert BadCommitment();
 
         submission.revealed = true;
         submission.proposalScore = proposalScore;
@@ -468,11 +507,13 @@ contract DAIOCore {
         }
     }
 
-    function submitAuditCommit(uint256 requestId, bytes32 commitHash) external {
+    function submitAuditCommit(uint256 requestId) external {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditCommit);
         if (_isTimedOut(request_)) revert PhaseTimedOut();
-        if (commitHash == bytes32(0)) revert BadCommitment();
         if (!reviewSubmissions[requestId][msg.sender].revealed) revert IneligibleReviewer();
+
+        bytes32 commitHash = commitReveal.saved_commits(auditCommitRound(requestId), msg.sender);
+        if (commitHash == bytes32(0)) revert BadCommitment();
 
         AuditSubmission storage submission = auditSubmissions[requestId][msg.sender];
         if (submission.committed) revert AlreadySubmitted();
@@ -492,7 +533,8 @@ contract DAIOCore {
         uint256 requestId,
         address[] calldata targets,
         uint16[] calldata scores,
-        bytes32 salt
+        uint256 seed,
+        uint256[4] calldata vrfProof
     ) external {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditReveal);
         if (_isTimedOut(request_)) revert PhaseTimedOut();
@@ -504,14 +546,22 @@ contract DAIOCore {
         if (!submission.committed) revert IneligibleReviewer();
         if (submission.revealed) revert AlreadySubmitted();
 
-        bytes32 expected = keccak256(abi.encode(requestId, msg.sender, targets, scores, salt));
-        if (expected != submission.commitHash) revert BadCommitment();
+        bytes32 resultHash = hashAuditReveal(requestId, msg.sender, targets, scores);
+        if (!commitReveal.reveal_hashed(resultHash, msg.sender, seed, auditCommitRound(requestId))) revert BadCommitment();
+
+        bytes32 randomness = _vrfRandomness(msg.sender, vrfProof);
 
         for (uint256 i = 0; i < targets.length; i++) {
             address target = targets[i];
             if (scores[i] > SCALE) revert InvalidScore();
             if (target == msg.sender || !reviewSubmissions[requestId][target].revealed) revert InvalidAuditTarget();
-            if (!isAuditTargetSelected(requestId, msg.sender, target, salt)) revert NotSelected();
+            if (
+                !_passesSortition(
+                    AUDIT_SORTITION, requestId, msg.sender, target, randomness, request_.config.auditElectionDifficulty
+                )
+            ) {
+                revert NotSelected();
+            }
 
             for (uint256 j = 0; j < i; j++) {
                 if (targets[j] == target) revert InvalidAuditTarget();
@@ -588,32 +638,43 @@ contract DAIOCore {
         address reviewer,
         uint16 proposalScore,
         bytes32 reportHash,
-        string memory reportURI,
-        bytes32 salt
+        string memory reportURI
     ) public pure returns (bytes32) {
-        return keccak256(abi.encode(requestId, reviewer, proposalScore, reportHash, keccak256(bytes(reportURI)), salt));
+        return keccak256(abi.encode(requestId, reviewer, proposalScore, reportHash, keccak256(bytes(reportURI))));
     }
 
     function hashAuditReveal(
         uint256 requestId,
         address auditor,
         address[] memory targets,
-        uint16[] memory scores,
-        bytes32 salt
+        uint16[] memory scores
     ) public pure returns (bytes32) {
-        return keccak256(abi.encode(requestId, auditor, targets, scores, salt));
+        return keccak256(abi.encode(requestId, auditor, targets, scores));
     }
 
-    function isReviewSelected(uint256 requestId, address reviewer, bytes32 sortitionProof) public view returns (bool) {
-        Request storage request_ = _requireRequest(requestId);
-        uint256 score = _sortitionScore(REVIEW_SORTITION, requestId, reviewer, bytes32(0), sortitionProof);
-        return score < request_.config.reviewElectionDifficulty;
+    function reviewCommitRound(uint256 requestId) public pure returns (uint256) {
+        return requestId * 2;
     }
 
-    function isAuditTargetSelected(uint256 requestId, address auditor, address target, bytes32 salt) public view returns (bool) {
+    function auditCommitRound(uint256 requestId) public pure returns (uint256) {
+        return requestId * 2 + 1;
+    }
+
+    function isReviewSelected(uint256 requestId, address reviewer, uint256[4] calldata vrfProof) external view returns (bool) {
         Request storage request_ = _requireRequest(requestId);
-        uint256 score = _sortitionScore(AUDIT_SORTITION, requestId, auditor, bytes32(uint256(uint160(target))), salt);
-        return score < request_.config.auditElectionDifficulty;
+        bytes32 randomness = _vrfRandomness(reviewer, vrfProof);
+        return _passesSortition(REVIEW_SORTITION, requestId, reviewer, address(0), randomness, request_.config.reviewElectionDifficulty);
+    }
+
+    function isAuditTargetSelected(
+        uint256 requestId,
+        address auditor,
+        address target,
+        uint256[4] calldata vrfProof
+    ) external view returns (bool) {
+        Request storage request_ = _requireRequest(requestId);
+        bytes32 randomness = _vrfRandomness(auditor, vrfProof);
+        return _passesSortition(AUDIT_SORTITION, requestId, auditor, target, randomness, request_.config.auditElectionDifficulty);
     }
 
     function reviewerEligible(address reviewer, uint256 domainMask) external view returns (bool) {
@@ -621,11 +682,13 @@ contract DAIOCore {
     }
 
     function queueLength() external view returns (uint256) {
-        return _queue.length;
+        return priorityQueue.currentSize();
     }
 
     function queuedRequestAt(uint256 index) external view returns (uint256) {
-        return _queue[index];
+        if (index != 0 || priorityQueue.currentSize() == 0) revert InvalidAmount();
+        (, bytes32 encodedRequestId) = priorityQueue.top();
+        return uint256(encodedRequestId);
     }
 
     function getReviewCommitters(uint256 requestId) external view returns (address[] memory) {
@@ -924,14 +987,22 @@ contract DAIOCore {
         }
     }
 
-    function _sortitionScore(
+    function _vrfRandomness(address reviewerAddress, uint256[4] calldata vrfProof) internal view returns (bytes32) {
+        Reviewer storage reviewer = reviewers[reviewerAddress];
+        if (reviewer.vrfPublicKey[0] == 0 || reviewer.vrfPublicKey[1] == 0) revert IneligibleReviewer();
+        return vrfVerifier.randomnessFromProof(reviewer.vrfPublicKey, vrfProof, sortitionMessage);
+    }
+
+    function _passesSortition(
         bytes32 phase,
         uint256 requestId,
         address participant,
-        bytes32 subject,
-        bytes32 proofOrSalt
-    ) internal pure returns (uint256) {
-        return uint256(keccak256(abi.encode(phase, requestId, participant, subject, proofOrSalt))) % SCALE;
+        address subject,
+        bytes32 randomness,
+        uint256 difficulty
+    ) internal pure returns (bool) {
+        uint256 score = uint256(keccak256(abi.encode(phase, requestId, participant, subject, randomness))) % SCALE;
+        return score < difficulty;
     }
 
     function _slash(address reviewerAddress, uint256 amount, string memory reason) internal {

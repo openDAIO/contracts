@@ -1,5 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const vrfData = require("../lib/vrf-solidity/test/data.json");
 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
@@ -15,9 +16,31 @@ describe("DAIOCore", function () {
     const usdaio = await USDAIO.deploy(owner.address);
     await usdaio.waitForDeployment();
 
+    const CommitReveal = await ethers.getContractFactory("CommitReveal");
+    const commitReveal = await CommitReveal.deploy();
+    await commitReveal.waitForDeployment();
+
+    const PriorityQueue = await ethers.getContractFactory("PriorityQueue");
+    const priorityQueue = await PriorityQueue.deploy();
+    await priorityQueue.waitForDeployment();
+
+    const FRAINVRFVerifier = await ethers.getContractFactory("FRAINVRFVerifier");
+    const vrfVerifier = await FRAINVRFVerifier.deploy();
+    await vrfVerifier.waitForDeployment();
+
     const DAIOCore = await ethers.getContractFactory("DAIOCore");
-    const core = await DAIOCore.deploy(await usdaio.getAddress(), treasury.address);
+    const core = await DAIOCore.deploy(
+      await usdaio.getAddress(),
+      treasury.address,
+      await commitReveal.getAddress(),
+      await priorityQueue.getAddress(),
+      await vrfVerifier.getAddress()
+    );
     await core.waitForDeployment();
+
+    const vrfVector = vrfData.verify.valid[0];
+    const vrfPublicKey = Array.from(await vrfVerifier.decodePoint(vrfVector.pub));
+    const vrfProof = Array.from(await vrfVerifier.decodeProof(vrfVector.pi));
 
     const coreAddress = await core.getAddress();
     const reviewerStake = ethers.parseEther("1000");
@@ -31,11 +54,17 @@ describe("DAIOCore", function () {
     await usdaio.mint(requester.address, requesterFunds);
     await usdaio.connect(requester).approve(coreAddress, requesterFunds);
 
-    await core.connect(alice).registerReviewer("alice.daio.eth", ethers.id("alice.daio.eth"), 1001, DOMAIN_RESEARCH, reviewerStake);
-    await core.connect(bob).registerReviewer("bob.daio.eth", ethers.id("bob.daio.eth"), 1002, DOMAIN_RESEARCH, reviewerStake);
-    await core.connect(carol).registerReviewer("carol.daio.eth", ethers.id("carol.daio.eth"), 1003, DOMAIN_RESEARCH, reviewerStake);
+    await core
+      .connect(alice)
+      .registerReviewer("alice.daio.eth", ethers.id("alice.daio.eth"), 1001, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
+    await core
+      .connect(bob)
+      .registerReviewer("bob.daio.eth", ethers.id("bob.daio.eth"), 1002, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
+    await core
+      .connect(carol)
+      .registerReviewer("carol.daio.eth", ethers.id("carol.daio.eth"), 1003, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
 
-    return { owner, treasury, requester, alice, bob, carol, usdaio, core };
+    return { owner, treasury, requester, alice, bob, carol, usdaio, commitReveal, priorityQueue, vrfVerifier, vrfProof, core };
   }
 
   async function createFastRequest(core, requester, priorityFee = 0n) {
@@ -47,30 +76,39 @@ describe("DAIOCore", function () {
   }
 
   async function buildReviewCommit(core, requestId, reviewer, proposalScore, reportURI, saltLabel) {
-    const salt = ethers.id(`${saltLabel}:review`);
+    const seed = BigInt(ethers.id(`${saltLabel}:review`));
     const reportHash = ethers.id(`${reportURI}:hash`);
-    const commitHash = await core.hashReviewReveal(requestId, reviewer.address, proposalScore, reportHash, reportURI, salt);
+    const resultHash = await core.hashReviewReveal(requestId, reviewer.address, proposalScore, reportHash, reportURI);
 
     return {
       proposalScore,
       reportHash,
       reportURI,
-      salt,
-      commitHash,
-      proof: ethers.id(`${saltLabel}:review-proof`)
+      seed,
+      resultHash
     };
   }
 
   async function buildAuditCommit(core, requestId, auditor, targetSigners, scores, saltLabel) {
-    const salt = ethers.id(`${saltLabel}:audit`);
+    const seed = BigInt(ethers.id(`${saltLabel}:audit`));
     const targets = targetSigners.map((signer) => signer.address);
-    const commitHash = await core.hashAuditReveal(requestId, auditor.address, targets, scores, salt);
+    const resultHash = await core.hashAuditReveal(requestId, auditor.address, targets, scores);
 
-    return { targets, scores, salt, commitHash };
+    return { targets, scores, seed, resultHash };
+  }
+
+  async function commitReview(core, commitReveal, reviewer, requestId, review, vrfProof) {
+    await commitReveal.connect(reviewer).commit_hashed(review.resultHash, review.seed, await core.reviewCommitRound(requestId));
+    await core.connect(reviewer).submitReviewCommit(requestId, vrfProof);
+  }
+
+  async function commitAudit(core, commitReveal, auditor, requestId, audit) {
+    await commitReveal.connect(auditor).commit_hashed(audit.resultHash, audit.seed, await core.auditCommitRound(requestId));
+    await core.connect(auditor).submitAuditCommit(requestId);
   }
 
   it("runs the post-audit scoring and settlement path", async function () {
-    const { requester, alice, bob, carol, usdaio, core } = await deployFixture();
+    const { requester, alice, bob, carol, usdaio, commitReveal, vrfProof, core } = await deployFixture();
     const requestId = await createFastRequest(core, requester);
 
     await core.startNextRequest();
@@ -79,35 +117,35 @@ describe("DAIOCore", function () {
     const bobReview = await buildReviewCommit(core, requestId, bob, 6000, "ipfs://report-bob", "bob");
     const carolReview = await buildReviewCommit(core, requestId, carol, 2000, "ipfs://report-carol", "carol");
 
-    await core.connect(alice).submitReviewCommit(requestId, aliceReview.commitHash, aliceReview.proof);
-    await core.connect(bob).submitReviewCommit(requestId, bobReview.commitHash, bobReview.proof);
-    await core.connect(carol).submitReviewCommit(requestId, carolReview.commitHash, carolReview.proof);
+    await commitReview(core, commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(core, commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReview(core, commitReveal, carol, requestId, carolReview, vrfProof);
 
     await core
       .connect(alice)
-      .revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.salt);
+      .revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await core
       .connect(bob)
-      .revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.salt);
+      .revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
     await core
       .connect(carol)
-      .revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.salt);
+      .revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
 
     const aliceAudit = await buildAuditCommit(core, requestId, alice, [bob, carol], [7000, 4000], "alice");
     const bobAudit = await buildAuditCommit(core, requestId, bob, [alice, carol], [9000, 4500], "bob");
     const carolAudit = await buildAuditCommit(core, requestId, carol, [alice, bob], [8800, 7200], "carol");
 
-    await core.connect(alice).submitAuditCommit(requestId, aliceAudit.commitHash);
-    await core.connect(bob).submitAuditCommit(requestId, bobAudit.commitHash);
-    await core.connect(carol).submitAuditCommit(requestId, carolAudit.commitHash);
+    await commitAudit(core, commitReveal, alice, requestId, aliceAudit);
+    await commitAudit(core, commitReveal, bob, requestId, bobAudit);
+    await commitAudit(core, commitReveal, carol, requestId, carolAudit);
 
     const aliceBalanceBefore = await usdaio.balanceOf(alice.address);
     const bobBalanceBefore = await usdaio.balanceOf(bob.address);
     const carolBalanceBefore = await usdaio.balanceOf(carol.address);
 
-    await core.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.salt);
-    await core.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.salt);
-    await core.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.salt);
+    await core.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed, vrfProof);
+    await core.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed, vrfProof);
+    await core.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed, vrfProof);
 
     await core.finalizeRequest(requestId);
 
@@ -160,8 +198,25 @@ describe("DAIOCore", function () {
     expect(secondRequest.status).to.equal(REVIEW_COMMIT);
   });
 
+  it("rejects invalid FRAIN VRF proofs", async function () {
+    const { requester, alice, commitReveal, vrfProof, core } = await deployFixture();
+    const requestId = await createFastRequest(core, requester);
+
+    await core.startNextRequest();
+
+    const aliceReview = await buildReviewCommit(core, requestId, alice, 8000, "ipfs://report-alice", "alice");
+    await commitReveal.connect(alice).commit_hashed(aliceReview.resultHash, aliceReview.seed, await core.reviewCommitRound(requestId));
+
+    const badProof = [...vrfProof];
+    badProof[3] = badProof[3] + 1n;
+
+    await expect(core.connect(alice).submitReviewCommit(requestId, badProof)).to.be.revertedWith(
+      "FRAINVRFVerifier: invalid proof"
+    );
+  });
+
   it("rejects self-audit reveals", async function () {
-    const { requester, alice, bob, carol, core } = await deployFixture();
+    const { requester, alice, bob, carol, commitReveal, vrfProof, core } = await deployFixture();
     const requestId = await createFastRequest(core, requester);
 
     await core.startNextRequest();
@@ -170,29 +225,29 @@ describe("DAIOCore", function () {
     const bobReview = await buildReviewCommit(core, requestId, bob, 6000, "ipfs://report-bob", "bob");
     const carolReview = await buildReviewCommit(core, requestId, carol, 2000, "ipfs://report-carol", "carol");
 
-    await core.connect(alice).submitReviewCommit(requestId, aliceReview.commitHash, aliceReview.proof);
-    await core.connect(bob).submitReviewCommit(requestId, bobReview.commitHash, bobReview.proof);
-    await core.connect(carol).submitReviewCommit(requestId, carolReview.commitHash, carolReview.proof);
+    await commitReview(core, commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(core, commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReview(core, commitReveal, carol, requestId, carolReview, vrfProof);
 
     await core
       .connect(alice)
-      .revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.salt);
+      .revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await core
       .connect(bob)
-      .revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.salt);
+      .revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
     await core
       .connect(carol)
-      .revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.salt);
+      .revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
 
     const badAudit = await buildAuditCommit(core, requestId, alice, [alice], [9000], "alice-self");
     const bobAudit = await buildAuditCommit(core, requestId, bob, [alice], [9000], "bob");
     const carolAudit = await buildAuditCommit(core, requestId, carol, [bob], [7200], "carol");
 
-    await core.connect(alice).submitAuditCommit(requestId, badAudit.commitHash);
-    await core.connect(bob).submitAuditCommit(requestId, bobAudit.commitHash);
-    await core.connect(carol).submitAuditCommit(requestId, carolAudit.commitHash);
+    await commitAudit(core, commitReveal, alice, requestId, badAudit);
+    await commitAudit(core, commitReveal, bob, requestId, bobAudit);
+    await commitAudit(core, commitReveal, carol, requestId, carolAudit);
 
-    await expect(core.connect(alice).revealAudit(requestId, badAudit.targets, badAudit.scores, badAudit.salt))
+    await expect(core.connect(alice).revealAudit(requestId, badAudit.targets, badAudit.scores, badAudit.seed, vrfProof))
       .to.be.revertedWithCustomError(core, "InvalidAuditTarget");
   });
 });

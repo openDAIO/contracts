@@ -1,0 +1,9 @@
+[submodule "lib/vrf-solidity"]
+	path = lib/vrf-solidity
+	url = https://github.com/FRAIN-chain/vrf-solidity.git
+[submodule "lib/hash-contract"]
+	path = lib/hash-contract
+	url = https://github.com/FRAIN-chain/hash-contract.git
+[submodule "lib/queue-contract"]
+	path = lib/queue-contract
+	url = https://github.com/FRAIN-chain/queue-contract.git
