@@ -16,6 +16,19 @@ interface IReviewerERC8004Adapter {
     function agentWallet(uint256 agentId) external view returns (address);
 }
 
+interface IReviewerReputationLedger {
+    function reputations(address reviewer)
+        external
+        view
+        returns (
+            uint256 samples,
+            uint256 reportQuality,
+            uint256 auditReliability,
+            uint256 finalContribution,
+            uint256 protocolCompliance
+        );
+}
+
 contract ReviewerRegistry {
     struct Reviewer {
         bool registered;
@@ -38,16 +51,25 @@ contract ReviewerRegistry {
     IReviewerStakeVault public stakeVault;
     IReviewerENSVerifier public ensVerifier;
     IReviewerERC8004Adapter public erc8004Adapter;
+    IReviewerReputationLedger public reputationLedger;
     uint256 public minStake = 1_000 ether;
+    uint256 public minReputationSamples = 3;
+    uint256 public minFinalContribution = 3_000;
+    uint256 public minProtocolCompliance = 7_000;
 
     mapping(address reviewer => Reviewer data) internal reviewers;
+    mapping(address reviewer => uint256 amount) public lockedStake;
+    mapping(uint256 requestId => mapping(address reviewer => uint256 amount)) public requestLockedStake;
 
     event IdentityModulesUpdated(address indexed ensVerifier, address indexed erc8004Adapter);
     event CoreUpdated(address indexed core);
     event MinStakeUpdated(uint256 minStake);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event ReputationGateUpdated(address indexed reputationLedger, uint256 minSamples, uint256 minFinalContribution, uint256 minProtocolCompliance);
     event ReviewerRegistered(address indexed reviewer, uint256 indexed agentId, bytes32 indexed ensNode, uint256 stake, uint256 domainMask);
     event ReviewerSlashed(address indexed reviewer, uint256 amount, string reason);
+    event StakeLocked(address indexed reviewer, uint256 indexed requestId, uint256 amount);
+    event StakeUnlocked(address indexed reviewer, uint256 indexed requestId, uint256 amount);
 
     error IneligibleReviewer();
     error InvalidAddress();
@@ -87,6 +109,15 @@ contract ReviewerRegistry {
     function setMinStake(uint256 newMinStake) external onlyOwner {
         minStake = newMinStake;
         emit MinStakeUpdated(newMinStake);
+    }
+
+    function setReputationGate(address reputationLedger_, uint256 minSamples, uint256 minContribution, uint256 minCompliance) external onlyOwner {
+        if (minContribution > 10_000 || minCompliance > 10_000) revert InvalidAmount();
+        reputationLedger = IReviewerReputationLedger(reputationLedger_);
+        minReputationSamples = minSamples;
+        minFinalContribution = minContribution;
+        minProtocolCompliance = minCompliance;
+        emit ReputationGateUpdated(reputationLedger_, minSamples, minContribution, minCompliance);
     }
 
     function setIdentityModules(address ensVerifier_, address erc8004Adapter_) external onlyOwner {
@@ -141,17 +172,24 @@ contract ReviewerRegistry {
 
     function withdrawStake(uint256 amount) external {
         Reviewer storage reviewer = reviewers[msg.sender];
-        if (!reviewer.registered || amount == 0 || reviewer.stake < amount) revert InvalidAmount();
+        if (!reviewer.registered || amount == 0 || reviewer.stake < amount || availableStake(msg.sender) < amount) revert InvalidAmount();
         uint256 remaining = reviewer.stake - amount;
         if (reviewer.active && remaining < minStake) revert InvalidAmount();
         reviewer.stake = remaining;
         stakeVault.withdrawStake(msg.sender, msg.sender, amount);
     }
 
+    function availableStake(address reviewerAddress) public view returns (uint256) {
+        uint256 stake = reviewers[reviewerAddress].stake;
+        uint256 locked = lockedStake[reviewerAddress];
+        return stake > locked ? stake - locked : 0;
+    }
+
     function isEligible(address reviewerAddress, uint256 domainMask) external view returns (bool) {
         Reviewer storage reviewer = reviewers[reviewerAddress];
         return reviewer.registered && reviewer.active && !reviewer.suspended && reviewer.stake >= minStake
-            && reviewer.cooldownUntilBlock <= block.number && (reviewer.domainMask & domainMask) != 0;
+            && availableStake(reviewerAddress) >= minStake && reviewer.cooldownUntilBlock <= block.number
+            && (reviewer.domainMask & domainMask) != 0 && _passesReputationGate(reviewerAddress);
     }
 
     function vrfPublicKey(address reviewerAddress) external view returns (uint256[2] memory) {
@@ -164,6 +202,26 @@ contract ReviewerRegistry {
 
     function markCompleted(address reviewerAddress) external onlyCore {
         reviewers[reviewerAddress].completedRequests++;
+    }
+
+    function lockStake(address reviewerAddress, uint256 requestId) external onlyCore returns (uint256 amount) {
+        Reviewer storage reviewer = reviewers[reviewerAddress];
+        if (!reviewer.registered || requestId == 0) revert InvalidAmount();
+        if (requestLockedStake[requestId][reviewerAddress] != 0) return 0;
+        if (availableStake(reviewerAddress) < minStake) revert InvalidAmount();
+
+        amount = minStake;
+        requestLockedStake[requestId][reviewerAddress] = amount;
+        lockedStake[reviewerAddress] += amount;
+        emit StakeLocked(reviewerAddress, requestId, amount);
+    }
+
+    function unlockStake(address reviewerAddress, uint256 requestId) external onlyCore returns (uint256 amount) {
+        amount = requestLockedStake[requestId][reviewerAddress];
+        if (amount == 0) return 0;
+        delete requestLockedStake[requestId][reviewerAddress];
+        lockedStake[reviewerAddress] = lockedStake[reviewerAddress] > amount ? lockedStake[reviewerAddress] - amount : 0;
+        emit StakeUnlocked(reviewerAddress, requestId, amount);
     }
 
     function recordSemanticFault(address reviewerAddress, uint256 threshold, uint256 cooldownBlocks) external onlyCore returns (bool suspended) {
@@ -187,9 +245,17 @@ contract ReviewerRegistry {
         if (amount == 0) return 0;
         if (amount > reviewer.stake) amount = reviewer.stake;
         reviewer.stake -= amount;
+        if (lockedStake[reviewerAddress] > reviewer.stake) lockedStake[reviewerAddress] = reviewer.stake;
         if (protocolFault) reviewer.protocolFaults++;
         stakeVault.slashStake(reviewerAddress, amount, reason);
         emit ReviewerSlashed(reviewerAddress, amount, reason);
+    }
+
+    function _passesReputationGate(address reviewerAddress) internal view returns (bool) {
+        if (address(reputationLedger) == address(0) || minReputationSamples == 0) return true;
+        (uint256 samples,,, uint256 finalContribution, uint256 protocolCompliance) = reputationLedger.reputations(reviewerAddress);
+        if (samples < minReputationSamples) return true;
+        return finalContribution >= minFinalContribution && protocolCompliance >= minProtocolCompliance;
     }
 
     function getReviewer(address reviewerAddress)

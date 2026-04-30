@@ -114,6 +114,7 @@ describe("PROPOSAL parity modules", function () {
     await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
     await reviewerRegistry.setCore(await core.getAddress());
     await reputationLedger.setCore(await core.getAddress());
+    await reviewerRegistry.setReputationGate(await reputationLedger.getAddress(), 3, 3000, 7000);
     await commitReveal.setCore(await core.getAddress());
     await priorityQueue.setCore(await core.getAddress());
 
@@ -317,7 +318,7 @@ describe("PROPOSAL parity modules", function () {
     const DAIOAutoConvertHook = await ethers.getContractFactory("DAIOAutoConvertHook");
     const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress());
     await hook.waitForDeployment();
-    await hook.setAllowedRouter(await swapAdapter.getAddress(), true);
+    await hook.setIntentWriter(await swapAdapter.getAddress(), true);
     await hook.setAllowedRouter(await universalRouter.getAddress(), true);
     await swapAdapter.setAutoConvertHook(await hook.getAddress());
 
@@ -340,22 +341,30 @@ describe("PROPOSAL parity modules", function () {
       0,
       chainId
     );
-    const poolKey = ethers.id("usdc-usdaio-pool");
+    const [currency0, currency1] = sortCurrencies(await inputToken.getAddress(), await usdaio.getAddress());
+    const key = { currency0, currency1, fee: 3000, tickSpacing: 60, hooks: await hook.getAddress() };
+    const poolKey = await hook.poolKeyHash(key);
+    const usdaioIsCurrency0 = currency0.toLowerCase() === (await usdaio.getAddress()).toLowerCase();
+    const hookData = ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [calculatedIntent]);
     await hook.setPool(poolKey, true);
 
     await inputToken.mint(requester.address, amountInMax);
     await inputToken.connect(requester).approve(await paymentRouter.getAddress(), amountInMax);
     await usdaio.mint(await universalRouter.getAddress(), required);
 
-    const routerCalldata = universalRouter.interface.encodeFunctionData("swapWithValidation", [
+    const routerCalldata = universalRouter.interface.encodeFunctionData("swapWithV4Hook", [
       await inputToken.getAddress(),
       await usdaio.getAddress(),
       await paymentRouter.getAddress(),
       inputUsed,
       required,
+      await poolManager.getAddress(),
       await hook.getAddress(),
-      calculatedIntent,
-      poolKey
+      await universalRouter.getAddress(),
+      key,
+      usdaioIsCurrency0 ? required : 0,
+      usdaioIsCurrency0 ? 0 : required,
+      hookData
     ]);
 
     await paymentRouter
@@ -388,7 +397,7 @@ describe("PROPOSAL parity modules", function () {
     const DAIOAutoConvertHook = await ethers.getContractFactory("DAIOAutoConvertHook");
     const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress());
     await hook.waitForDeployment();
-    await hook.setAllowedRouter(await swapAdapter.getAddress(), true);
+    await hook.setIntentWriter(await swapAdapter.getAddress(), true);
     await swapAdapter.setAutoConvertHook(await hook.getAddress());
     await acceptedTokenRegistry.setAcceptedToken(await inputToken.getAddress(), true, true);
 
@@ -460,11 +469,27 @@ describe("PROPOSAL parity modules", function () {
         true,
         -1,
         0,
-        usdaioIsCurrency0 ? -required : 0,
-        usdaioIsCurrency0 ? 0 : -required,
+        usdaioIsCurrency0 ? required : 0,
+        usdaioIsCurrency0 ? 0 : required,
         hookData
       )
     ).to.emit(hook, "AutoConvertValidated");
+
+    const negativeOutputIntent = ethers.id("negative-output-intent");
+    await hook.registerIntent(negativeOutputIntent, await inputToken.getAddress(), required);
+    await expect(
+      poolManager.callAfterSwap(
+        await hook.getAddress(),
+        router.address,
+        key,
+        true,
+        -1,
+        0,
+        usdaioIsCurrency0 ? -required : 0,
+        usdaioIsCurrency0 ? 0 : -required,
+        ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [negativeOutputIntent])
+      )
+    ).to.be.revertedWith("DAIOAutoConvertHook: insufficient output");
 
     const wrongRouterIntent = ethers.id("wrong-router-intent");
     await hook.registerIntent(wrongRouterIntent, await inputToken.getAddress(), required);
@@ -476,8 +501,8 @@ describe("PROPOSAL parity modules", function () {
         true,
         -1,
         0,
-        usdaioIsCurrency0 ? -required : 0,
-        usdaioIsCurrency0 ? 0 : -required,
+        usdaioIsCurrency0 ? required : 0,
+        usdaioIsCurrency0 ? 0 : required,
         ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [wrongRouterIntent])
       )
     ).to.be.revertedWith("DAIOAutoConvertHook: router not allowed");
@@ -496,8 +521,8 @@ describe("PROPOSAL parity modules", function () {
         true,
         -1,
         0,
-        usdaioIsBadCurrency0 ? -required : 0,
-        usdaioIsBadCurrency0 ? 0 : -required,
+        usdaioIsBadCurrency0 ? required : 0,
+        usdaioIsBadCurrency0 ? 0 : required,
         ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [badPairIntent])
       )
     ).to.be.revertedWith("DAIOAutoConvertHook: bad pair");
@@ -512,8 +537,8 @@ describe("PROPOSAL parity modules", function () {
         true,
         -1,
         0,
-        usdaioIsCurrency0 ? -(required - 1n) : 0,
-        usdaioIsCurrency0 ? 0 : -(required - 1n),
+        usdaioIsCurrency0 ? required - 1n : 0,
+        usdaioIsCurrency0 ? 0 : required - 1n,
         ethers.AbiCoder.defaultAbiCoder().encode(["bytes32"], [lowOutputIntent])
       )
     ).to.be.revertedWith("DAIOAutoConvertHook: insufficient output");

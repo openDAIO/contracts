@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.6.12;
+pragma experimental ABIEncoderV2;
 
 import "../../lib/hash-contract/contracts/CommitReveal.sol";
 
@@ -13,7 +14,7 @@ interface IDAIOCommitSink {
         string calldata reportURI,
         uint256 seed
     ) external;
-    function submitAuditCommitFor(address auditor, uint256 requestId, uint256[4] calldata vrfProof) external;
+    function submitAuditCommitFor(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) external;
     function revealAuditFor(address auditor, uint256 requestId, address[] calldata targets, uint16[] calldata scores, uint256 seed) external;
     function reviewCommitRound(uint256 requestId) external view returns (uint256);
     function auditCommitRound(uint256 requestId) external view returns (uint256);
@@ -84,10 +85,10 @@ contract DAIOCommitRevealManager is CommitReveal {
         IDAIOCommitSink(core).revealReviewFor(msg.sender, requestId, proposalScore, reportHash, reportURI, seed);
     }
 
-    function commitAudit(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4] calldata vrfProof) external {
+    function commitAudit(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4][] calldata targetProofs) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
         commit_hashed(resultHash, seed, IDAIOCommitSink(core).auditCommitRound(requestId));
-        IDAIOCommitSink(core).submitAuditCommitFor(msg.sender, requestId, vrfProof);
+        IDAIOCommitSink(core).submitAuditCommitFor(msg.sender, requestId, targetProofs);
     }
 
     function revealAudit(uint256 requestId, address[] calldata targets, uint16[] calldata scores, uint256 seed) external {

@@ -1,13 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+
 interface IMockERC20Like {
     function transfer(address to, uint256 value) external returns (bool);
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 }
 
-interface IMockAutoConvertHook {
-    function validateAutoConvert(bytes32 intentHash, bytes32 poolKey) external;
+interface IMockV4PoolManagerLike {
+    function callAfterSwap(
+        address hook,
+        address sender,
+        PoolKey calldata key,
+        bool zeroForOne,
+        int256 amountSpecified,
+        uint160 sqrtPriceLimitX96,
+        int128 amount0,
+        int128 amount1,
+        bytes calldata hookData
+    ) external returns (bytes4 selector, int128 hookDelta);
 }
 
 contract MockUniversalRouter {
@@ -33,33 +45,41 @@ contract MockUniversalRouter {
         }
     }
 
-    function swapWithValidation(
+    function swapWithV4Hook(
         address inputToken,
         address outputToken,
         address recipient,
         uint256 inputUsed,
         uint256 outputAmount,
+        address poolManager,
         address hook,
-        bytes32 intentHash,
-        bytes32 poolKey
+        address swapSender,
+        PoolKey calldata key,
+        int128 amount0,
+        int128 amount1,
+        bytes calldata hookData
     ) external {
         require(IMockERC20Like(inputToken).transferFrom(msg.sender, address(this), inputUsed), "MockUniversalRouter: input failed");
         require(IMockERC20Like(outputToken).transfer(recipient, outputAmount), "MockUniversalRouter: output failed");
-        IMockAutoConvertHook(hook).validateAutoConvert(intentHash, poolKey);
+        IMockV4PoolManagerLike(poolManager).callAfterSwap(hook, swapSender, key, true, -int256(inputUsed), 0, amount0, amount1, hookData);
     }
 
-    function swapETHWithValidation(
+    function swapETHWithV4Hook(
         address outputToken,
         address recipient,
         uint256 ethUsed,
         uint256 outputAmount,
+        address poolManager,
         address hook,
-        bytes32 intentHash,
-        bytes32 poolKey
+        address swapSender,
+        PoolKey calldata key,
+        int128 amount0,
+        int128 amount1,
+        bytes calldata hookData
     ) external payable {
         require(msg.value >= ethUsed, "MockUniversalRouter: insufficient ETH");
         require(IMockERC20Like(outputToken).transfer(recipient, outputAmount), "MockUniversalRouter: output failed");
-        IMockAutoConvertHook(hook).validateAutoConvert(intentHash, poolKey);
+        IMockV4PoolManagerLike(poolManager).callAfterSwap(hook, swapSender, key, true, -int256(ethUsed), 0, amount0, amount1, hookData);
         if (msg.value > ethUsed) {
             (bool ok,) = msg.sender.call{value: msg.value - ethUsed}("");
             require(ok, "MockUniversalRouter: refund failed");

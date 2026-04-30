@@ -25,6 +25,7 @@ contract DAIOAutoConvertHook is BaseHook {
     Currency public immutable usdaio;
 
     mapping(address router => bool allowed) public allowedRouters;
+    mapping(address writer => bool allowed) public intentWriters;
     mapping(bytes32 intentHash => bool allowed) public allowedIntents;
     mapping(bytes32 poolKey => bool allowed) public allowedPools;
     mapping(bytes32 intentHash => Intent intent) public intents;
@@ -32,6 +33,7 @@ contract DAIOAutoConvertHook is BaseHook {
     event AutoConvertValidated(bytes32 indexed intentHash, bytes32 indexed poolKey, address indexed router, uint256 outputAmount);
     event IntentRegistered(bytes32 indexed intentHash, address indexed paymentToken, uint256 requiredUsdaio);
     event IntentSet(bytes32 indexed intentHash, bool allowed);
+    event IntentWriterSet(address indexed writer, bool allowed);
     event PoolSet(bytes32 indexed poolKey, bool allowed);
     event PaymentRouterUpdated(address indexed paymentRouter);
     event RouterSet(address indexed router, bool allowed);
@@ -41,8 +43,8 @@ contract DAIOAutoConvertHook is BaseHook {
         _;
     }
 
-    modifier onlyPaymentRouter() {
-        require(msg.sender == paymentRouter || allowedRouters[msg.sender], "DAIOAutoConvertHook: wrong router");
+    modifier onlyIntentWriter() {
+        require(msg.sender == paymentRouter || intentWriters[msg.sender], "DAIOAutoConvertHook: not intent writer");
         _;
     }
 
@@ -51,9 +53,9 @@ contract DAIOAutoConvertHook is BaseHook {
         owner = msg.sender;
         paymentRouter = paymentRouter_;
         usdaio = Currency.wrap(usdaio_);
-        allowedRouters[paymentRouter_] = true;
+        intentWriters[paymentRouter_] = true;
         emit PaymentRouterUpdated(paymentRouter_);
-        emit RouterSet(paymentRouter_, true);
+        emit IntentWriterSet(paymentRouter_, true);
     }
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
@@ -80,9 +82,15 @@ contract DAIOAutoConvertHook is BaseHook {
     function setPaymentRouter(address newPaymentRouter) external onlyOwner {
         require(newPaymentRouter != address(0), "DAIOAutoConvertHook: bad router");
         paymentRouter = newPaymentRouter;
-        allowedRouters[newPaymentRouter] = true;
+        intentWriters[newPaymentRouter] = true;
         emit PaymentRouterUpdated(newPaymentRouter);
-        emit RouterSet(newPaymentRouter, true);
+        emit IntentWriterSet(newPaymentRouter, true);
+    }
+
+    function setIntentWriter(address writer, bool allowed) external onlyOwner {
+        require(writer != address(0), "DAIOAutoConvertHook: bad writer");
+        intentWriters[writer] = allowed;
+        emit IntentWriterSet(writer, allowed);
     }
 
     function setAllowedRouter(address router, bool allowed) external onlyOwner {
@@ -91,17 +99,12 @@ contract DAIOAutoConvertHook is BaseHook {
         emit RouterSet(router, allowed);
     }
 
-    function setIntent(bytes32 intentHash, bool allowed) external onlyOwner {
-        allowedIntents[intentHash] = allowed;
-        emit IntentSet(intentHash, allowed);
-    }
-
     function setPool(bytes32 poolKey, bool allowed) external onlyOwner {
         allowedPools[poolKey] = allowed;
         emit PoolSet(poolKey, allowed);
     }
 
-    function registerIntent(bytes32 intentHash, address paymentToken, uint256 requiredUsdaio) external onlyPaymentRouter {
+    function registerIntent(bytes32 intentHash, address paymentToken, uint256 requiredUsdaio) external onlyIntentWriter {
         require(intentHash != bytes32(0) && requiredUsdaio != 0, "DAIOAutoConvertHook: bad intent");
         allowedIntents[intentHash] = true;
         intents[intentHash] = Intent({paymentToken: paymentToken, requiredUsdaio: requiredUsdaio, registered: true, consumed: false});
@@ -109,18 +112,11 @@ contract DAIOAutoConvertHook is BaseHook {
         emit IntentSet(intentHash, true);
     }
 
-    function consumeValidation(bytes32 intentHash) external onlyPaymentRouter {
+    function consumeValidation(bytes32 intentHash) external onlyIntentWriter {
         require(intents[intentHash].consumed, "DAIOAutoConvertHook: unconsumed intent");
         delete intents[intentHash];
         allowedIntents[intentHash] = false;
         emit IntentSet(intentHash, false);
-    }
-
-    function validateAutoConvert(bytes32 intentHash, bytes32 poolKey) external onlyPaymentRouter {
-        require(allowedIntents[intentHash], "DAIOAutoConvertHook: unknown intent");
-        require(allowedPools[poolKey], "DAIOAutoConvertHook: unknown pool");
-        intents[intentHash].consumed = true;
-        emit AutoConvertValidated(intentHash, poolKey, msg.sender, intents[intentHash].requiredUsdaio);
     }
 
     function _afterSwap(
@@ -139,7 +135,7 @@ contract DAIOAutoConvertHook is BaseHook {
         require(allowedPools[poolKey], "DAIOAutoConvertHook: pool not allowed");
         require(_poolContains(key, Currency.wrap(intent.paymentToken)) && _poolContains(key, usdaio), "DAIOAutoConvertHook: bad pair");
 
-        uint256 outputAmount = _absUsdaioDelta(key, delta);
+        uint256 outputAmount = _usdaioOutput(key, delta);
         require(outputAmount >= intent.requiredUsdaio, "DAIOAutoConvertHook: insufficient output");
 
         intent.consumed = true;
@@ -155,8 +151,8 @@ contract DAIOAutoConvertHook is BaseHook {
         return Currency.unwrap(key.currency0) == Currency.unwrap(currency) || Currency.unwrap(key.currency1) == Currency.unwrap(currency);
     }
 
-    function _absUsdaioDelta(PoolKey calldata key, BalanceDelta delta) internal view returns (uint256) {
+    function _usdaioOutput(PoolKey calldata key, BalanceDelta delta) internal view returns (uint256) {
         int128 amount = Currency.unwrap(key.currency0) == Currency.unwrap(usdaio) ? delta.amount0() : delta.amount1();
-        return amount < 0 ? uint256(uint128(-amount)) : uint256(uint128(amount));
+        return amount > 0 ? uint256(uint128(amount)) : 0;
     }
 }

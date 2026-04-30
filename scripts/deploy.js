@@ -239,6 +239,7 @@ async function main() {
   await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
   await reviewerRegistry.setCore(await core.getAddress());
   await reputationLedger.setCore(await core.getAddress());
+  await reviewerRegistry.setReputationGate(await reputationLedger.getAddress(), 3, 3000, 7000);
   await commitReveal.setCore(await core.getAddress());
   await priorityQueue.setCore(await core.getAddress());
 
@@ -302,7 +303,7 @@ async function main() {
 
     if (poolManagerAddress && process.env.ENABLE_AUTO_CONVERT_HOOK === "true") {
       autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
-      await autoConvertHook.setAllowedRouter(await swapAdapter.getAddress(), true);
+      await autoConvertHook.setIntentWriter(await swapAdapter.getAddress(), true);
       await autoConvertHook.setAllowedRouter(universalRouterAddress, true);
       await swapAdapter.setAutoConvertHook(await autoConvertHook.getAddress());
     }

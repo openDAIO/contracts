@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-interface IDAIOCoreReputationView {
+interface IReputationLedgerView {
     function reputations(address reviewer)
         external
         view
@@ -12,7 +12,9 @@ interface IDAIOCoreReputationView {
             uint256 finalContribution,
             uint256 protocolCompliance
         );
+}
 
+interface IDAIOCoreResultView {
     function getReviewerResult(uint256 requestId, address reviewer)
         external
         view
@@ -31,11 +33,13 @@ interface IDAIOCoreReputationView {
 }
 
 contract ReputationReader {
-    IDAIOCoreReputationView public immutable core;
+    IReputationLedgerView public immutable reputationLedger;
+    IDAIOCoreResultView public immutable core;
 
-    constructor(address core_) {
-        require(core_ != address(0), "ReputationReader: bad core");
-        core = IDAIOCoreReputationView(core_);
+    constructor(address reputationLedger_, address core_) {
+        require(reputationLedger_ != address(0) && core_ != address(0), "ReputationReader: bad config");
+        reputationLedger = IReputationLedgerView(reputationLedger_);
+        core = IDAIOCoreResultView(core_);
     }
 
     function longTermSignals(address reviewer)
@@ -49,7 +53,7 @@ contract ReputationReader {
             uint256 protocolCompliance
         )
     {
-        return core.reputations(reviewer);
+        return reputationLedger.reputations(reviewer);
     }
 
     function requestSignals(uint256 requestId, address reviewer)

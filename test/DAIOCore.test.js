@@ -6,10 +6,12 @@ const vrfData = require("../lib/vrf-solidity/test/data.json");
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
 const STANDARD = 1;
+const CRITICAL = 2;
 const FINALIZED = 6n;
 const QUEUED = 1n;
 const REVIEW_COMMIT = 2n;
 const AUDIT_COMMIT = 4n;
+const UNRESOLVED = 9n;
 
 function tierConfig({
   reviewCommitQuorum,
@@ -130,6 +132,7 @@ describe("DAIOCore", function () {
     await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
     await reviewerRegistry.setCore(await core.getAddress());
     await reputationLedger.setCore(await core.getAddress());
+    await reviewerRegistry.setReputationGate(await reputationLedger.getAddress(), 3, 3000, 7000);
     await commitReveal.setCore(await core.getAddress());
     await priorityQueue.setCore(await core.getAddress());
 
@@ -181,6 +184,31 @@ describe("DAIOCore", function () {
         reviewRevealTimeout: 2 * 60 * 60,
         auditCommitTimeout: 2 * 60 * 60,
         auditRevealTimeout: 2 * 60 * 60
+      })
+    );
+    await core.setTierConfig(
+      CRITICAL,
+      tierConfig({
+        reviewCommitQuorum: 3,
+        reviewRevealQuorum: 3,
+        auditCommitQuorum: 3,
+        auditRevealQuorum: 3,
+        auditTargetLimit: 2,
+        minIncomingAudit: 3,
+        auditCoverageQuorum: 10000,
+        contributionThreshold: 1000,
+        reviewEpochSize: 25,
+        auditEpochSize: 25,
+        finalityFactor: 2,
+        maxRetries: 0,
+        protocolFaultSlashBps: 500,
+        missedRevealSlashBps: 100,
+        semanticSlashBps: 200,
+        cooldownBlocks: 100,
+        reviewCommitTimeout: 30 * 60,
+        reviewRevealTimeout: 30 * 60,
+        auditCommitTimeout: 30 * 60,
+        auditRevealTimeout: 30 * 60
       })
     );
 
@@ -276,8 +304,12 @@ describe("DAIOCore", function () {
     await commitReveal.connect(reviewer).commitReview(requestId, review.resultHash, review.seed, vrfProof);
   }
 
-  async function commitAudit(commitReveal, auditor, requestId, audit, vrfProof) {
-    await commitReveal.connect(auditor).commitAudit(requestId, audit.resultHash, audit.seed, vrfProof);
+  function auditProofs(vrfProof, reviewerCount = 3) {
+    return Array.from({ length: reviewerCount - 1 }, () => vrfProof);
+  }
+
+  async function commitAudit(commitReveal, auditor, requestId, audit, vrfProof, reviewerCount = 3) {
+    await commitReveal.connect(auditor).commitAudit(requestId, audit.resultHash, audit.seed, auditProofs(vrfProof, reviewerCount));
   }
 
   it("runs the post-audit scoring and settlement path", async function () {
@@ -466,5 +498,120 @@ describe("DAIOCore", function () {
     expect(stakeAfter).to.be.lt(stakeBefore);
     expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
     expect(request.status).to.equal(5n);
+  });
+
+  it("slashes invalid target-specific audit VRF proofs without accepting the audit commit", async function () {
+    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const requestId = await createRequest(paymentRouter, requester, FAST);
+
+    await core.startNextRequest();
+
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
+    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
+
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
+
+    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
+    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
+    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
+
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
+    const badProof = [...vrfProof];
+    badProof[0] = 0n;
+    const stakeBefore = (await reviewerRegistry.getReviewer(alice.address)).stake;
+
+    await commitReveal.connect(alice).commitAudit(requestId, aliceAudit.resultHash, aliceAudit.seed, [badProof, vrfProof]);
+
+    const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
+    expect(stakeAfter).to.be.lt(stakeBefore);
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(AUDIT_COMMIT);
+  });
+
+  it("locks accepted reviewer stake until settlement", async function () {
+    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const requestId = await createRequest(paymentRouter, requester, FAST);
+
+    await core.startNextRequest();
+
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
+    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
+
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(ethers.parseEther("1000"));
+    await expect(reviewerRegistry.connect(alice).withdrawStake(1)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
+
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
+
+    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
+    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
+    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
+
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
+    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+
+    await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
+    await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
+    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
+
+    await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
+    await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
+    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
+    await core.finalizeRequest(requestId);
+
+    expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(0n);
+  });
+
+  it("marks Critical requests unresolved instead of finalizing below coverage quorum", async function () {
+    const { requester, alice, bob, carol, commitReveal, paymentRouter, vrfProof, core } = await deployFixture();
+    const requestId = await createRequest(paymentRouter, requester, CRITICAL, 0n, "critical-low-coverage");
+
+    await core.startNextRequest();
+
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
+    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
+
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
+
+    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
+    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
+    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
+
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
+    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+
+    await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
+    await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
+    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
+
+    await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
+    await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
+    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
+    await core.finalizeRequest(requestId);
+
+    const result = await core.getRequestFinalResult(requestId);
+    expect(result.status).to.equal(UNRESOLVED);
+    expect(result.auditCoverage).to.equal(0n);
+  });
+
+  it("excludes reviewers from eligibility after enough low long-term reputation samples", async function () {
+    const { owner, alice, reviewerRegistry, reputationLedger, core } = await deployFixture();
+
+    await reputationLedger.setCore(owner.address);
+    for (let i = 0; i < 3; i++) {
+      await reputationLedger.record(alice.address, 1001, 1000, 1000, 1000, 1000, false, 1000, false, "ipfs://low", ethers.id(`low-${i}`));
+    }
+    await reputationLedger.setCore(await core.getAddress());
+
+    expect(await reviewerRegistry.isEligible(alice.address, DOMAIN_RESEARCH)).to.equal(false);
   });
 });
