@@ -10,6 +10,7 @@ interface IERC20Minimal {
 
 interface IDAIOCorePayment {
     function baseRequestFee() external view returns (uint256);
+    function stakeVault() external view returns (address);
     function createRequestFor(
         address requester,
         string calldata proposalURI,
@@ -34,14 +35,16 @@ interface IUniswapV4SwapAdapter {
         uint256 amountOut,
         address payer,
         address recipient,
-        bytes calldata routerCalldata
+        bytes calldata routerCalldata,
+        bytes32 intentHash
     ) external returns (uint256 amountInUsed);
 
     function swapExactOutputETH(
         address outputToken,
         uint256 amountOut,
         address recipient,
-        bytes calldata routerCalldata
+        bytes calldata routerCalldata,
+        bytes32 intentHash
     ) external payable returns (uint256 amountInUsed);
 }
 
@@ -74,7 +77,7 @@ contract PaymentRouter {
     ) external returns (uint256 requestId) {
         uint256 requiredUsdaio = core.baseRequestFee() + priorityFee;
         require(usdaio.transferFrom(msg.sender, address(this), requiredUsdaio), "PaymentRouter: pull USDAIO failed");
-        require(usdaio.approve(address(core), requiredUsdaio), "PaymentRouter: approve failed");
+        require(usdaio.approve(core.stakeVault(), requiredUsdaio), "PaymentRouter: approve failed");
         requestId = core.createRequestFor(msg.sender, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
         emit RequestPaid(msg.sender, requestId, address(usdaio), requiredUsdaio);
     }
@@ -98,8 +101,10 @@ contract PaymentRouter {
         require(IERC20Minimal(inputToken).approve(address(swapAdapter), amountInMax), "PaymentRouter: approve input failed");
 
         uint256 requiredUsdaio = core.baseRequestFee() + priorityFee;
-        swapAdapter.swapExactOutput(inputToken, address(usdaio), amountInMax, requiredUsdaio, address(this), address(this), routerCalldata);
-        require(usdaio.approve(address(core), requiredUsdaio), "PaymentRouter: approve failed");
+        bytes32 intentHash =
+            keccak256(abi.encode(msg.sender, inputToken, requiredUsdaio, proposalHash, rubricHash, domainMask, tier, priorityFee, block.chainid));
+        swapAdapter.swapExactOutput(inputToken, address(usdaio), amountInMax, requiredUsdaio, address(this), address(this), routerCalldata, intentHash);
+        require(usdaio.approve(core.stakeVault(), requiredUsdaio), "PaymentRouter: approve failed");
         requestId = core.createRequestFor(msg.sender, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
         uint256 leftoverInput = IERC20Minimal(inputToken).balanceOf(address(this)) - inputBalanceBefore;
         if (leftoverInput > 0) {
@@ -120,8 +125,10 @@ contract PaymentRouter {
         require(acceptedTokenRegistry.acceptedTokens(address(0)), "PaymentRouter: ETH not accepted");
         uint256 ethBalanceBefore = address(this).balance - msg.value;
         uint256 requiredUsdaio = core.baseRequestFee() + priorityFee;
-        swapAdapter.swapExactOutputETH{value: msg.value}(address(usdaio), requiredUsdaio, address(this), routerCalldata);
-        require(usdaio.approve(address(core), requiredUsdaio), "PaymentRouter: approve failed");
+        bytes32 intentHash =
+            keccak256(abi.encode(msg.sender, address(0), requiredUsdaio, proposalHash, rubricHash, domainMask, tier, priorityFee, block.chainid));
+        swapAdapter.swapExactOutputETH{value: msg.value}(address(usdaio), requiredUsdaio, address(this), routerCalldata, intentHash);
+        require(usdaio.approve(core.stakeVault(), requiredUsdaio), "PaymentRouter: approve failed");
         requestId = core.createRequestFor(msg.sender, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
         uint256 leftoverEth = address(this).balance - ethBalanceBefore;
         if (leftoverEth > 0) {

@@ -13,7 +13,7 @@ interface IDAIOCoreReputationView {
             uint256 protocolCompliance
         );
 
-    function reviewerResults(uint256 requestId, address reviewer)
+    function getReviewerResult(uint256 requestId, address reviewer)
         external
         view
         returns (
@@ -22,6 +22,7 @@ interface IDAIOCoreReputationView {
             uint256 auditReliabilityRaw,
             uint256 normalizedAuditReliability,
             uint256 finalContribution,
+            uint256 scoreAgreement,
             uint256 reward,
             bool minorityOpinion,
             bool covered,
@@ -58,13 +59,14 @@ contract ReputationReader {
             uint256 reportQuality,
             uint256 auditReliability,
             uint256 finalContribution,
+            uint256 scoreAgreement,
             uint256 reward,
             bool minorityOpinion,
             bool covered,
             bool protocolFault
         )
     {
-        (, reportQuality,, auditReliability, finalContribution, reward, minorityOpinion, covered, protocolFault) =
-            core.reviewerResults(requestId, reviewer);
+        (, reportQuality,, auditReliability, finalContribution, scoreAgreement, reward, minorityOpinion, covered, protocolFault) =
+            core.getReviewerResult(requestId, reviewer);
     }
 }

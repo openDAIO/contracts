@@ -8,12 +8,19 @@ interface IERC20Minimal {
     function transferFrom(address from, address to, uint256 value) external returns (bool);
 }
 
+interface IDAIOAutoConvertHookLike {
+    function registerIntent(bytes32 intentHash, address paymentToken, uint256 requiredUsdaio) external;
+    function consumeValidation(bytes32 intentHash) external;
+}
+
 contract UniswapV4SwapAdapter {
     address public owner;
     address public paymentRouter;
     address public universalRouter;
+    IDAIOAutoConvertHookLike public autoConvertHook;
 
     event ExactOutputSwap(address indexed inputToken, address indexed outputToken, uint256 amountInMax, uint256 amountOut);
+    event AutoConvertHookUpdated(address indexed hook);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PaymentRouterUpdated(address indexed paymentRouter);
     event UniversalRouterUpdated(address indexed universalRouter);
@@ -56,6 +63,11 @@ contract UniswapV4SwapAdapter {
         emit UniversalRouterUpdated(newUniversalRouter);
     }
 
+    function setAutoConvertHook(address newHook) external onlyOwner {
+        autoConvertHook = IDAIOAutoConvertHookLike(newHook);
+        emit AutoConvertHookUpdated(newHook);
+    }
+
     function swapExactOutput(
         address inputToken,
         address outputToken,
@@ -63,9 +75,14 @@ contract UniswapV4SwapAdapter {
         uint256 amountOut,
         address payer,
         address recipient,
-        bytes calldata routerCalldata
+        bytes calldata routerCalldata,
+        bytes32 intentHash
     ) external onlyPaymentRouter returns (uint256 amountInUsed) {
         require(inputToken != address(0) && outputToken != address(0), "UniswapV4SwapAdapter: bad token");
+        if (address(autoConvertHook) != address(0)) {
+            autoConvertHook.registerIntent(intentHash, inputToken, amountOut);
+        }
+
         uint256 outputBefore = IERC20Minimal(outputToken).balanceOf(recipient);
         uint256 inputBefore = IERC20Minimal(inputToken).balanceOf(address(this));
 
@@ -77,6 +94,9 @@ contract UniswapV4SwapAdapter {
 
         uint256 outputDelta = IERC20Minimal(outputToken).balanceOf(recipient) - outputBefore;
         require(outputDelta >= amountOut, "UniswapV4SwapAdapter: insufficient output");
+        if (address(autoConvertHook) != address(0)) {
+            autoConvertHook.consumeValidation(intentHash);
+        }
 
         uint256 inputAfter = IERC20Minimal(inputToken).balanceOf(address(this));
         amountInUsed = amountInMax > inputAfter - inputBefore ? amountInMax - (inputAfter - inputBefore) : amountInMax;
@@ -92,8 +112,13 @@ contract UniswapV4SwapAdapter {
         address outputToken,
         uint256 amountOut,
         address recipient,
-        bytes calldata routerCalldata
+        bytes calldata routerCalldata,
+        bytes32 intentHash
     ) external payable onlyPaymentRouter returns (uint256 amountInUsed) {
+        if (address(autoConvertHook) != address(0)) {
+            autoConvertHook.registerIntent(intentHash, address(0), amountOut);
+        }
+
         uint256 outputBefore = IERC20Minimal(outputToken).balanceOf(recipient);
         uint256 ethBefore = address(this).balance - msg.value;
         (bool ok,) = universalRouter.call{value: msg.value}(routerCalldata);
@@ -101,6 +126,9 @@ contract UniswapV4SwapAdapter {
 
         uint256 outputDelta = IERC20Minimal(outputToken).balanceOf(recipient) - outputBefore;
         require(outputDelta >= amountOut, "UniswapV4SwapAdapter: insufficient output");
+        if (address(autoConvertHook) != address(0)) {
+            autoConvertHook.consumeValidation(intentHash);
+        }
 
         uint256 refund = address(this).balance - ethBefore;
         if (refund > 0) {
