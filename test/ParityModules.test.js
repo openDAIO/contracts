@@ -8,12 +8,12 @@ const QUEUED = 1n;
 
 function tierConfig() {
   return {
-    reviewElectionDifficulty: 10000,
-    auditElectionDifficulty: 10000,
-    reviewCommitQuorum: 3,
-    reviewRevealQuorum: 3,
-    auditCommitQuorum: 3,
-    auditRevealQuorum: 3,
+    reviewElectionDifficulty: 5000,
+    auditElectionDifficulty: 5000,
+    reviewCommitQuorum: 2,
+    reviewRevealQuorum: 2,
+    auditCommitQuorum: 2,
+    auditRevealQuorum: 2,
     auditTargetLimit: 2,
     minIncomingAudit: 1,
     auditCoverageQuorum: 7000,

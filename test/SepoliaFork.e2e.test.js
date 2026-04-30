@@ -9,6 +9,10 @@ const FORK_URL = process.env.SEPOLIA_RPC_URL || process.env.HARDHAT_FORK_URL || 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
 const FINALIZED = 6n;
+const SCALE = 10000n;
+const ELECTION_DIFFICULTY = 5000n;
+const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
+const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
 
 const SEPOLIA = {
   ensRegistry: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
@@ -21,12 +25,12 @@ const SEPOLIA = {
 
 function fastConfig() {
   return {
-    reviewElectionDifficulty: 10000,
-    auditElectionDifficulty: 10000,
-    reviewCommitQuorum: 3,
-    reviewRevealQuorum: 3,
-    auditCommitQuorum: 3,
-    auditRevealQuorum: 3,
+    reviewElectionDifficulty: Number(ELECTION_DIFFICULTY),
+    auditElectionDifficulty: Number(ELECTION_DIFFICULTY),
+    reviewCommitQuorum: 2,
+    reviewRevealQuorum: 2,
+    auditCommitQuorum: 2,
+    auditRevealQuorum: 2,
     auditTargetLimit: 2,
     minIncomingAudit: 1,
     auditCoverageQuorum: 7000,
@@ -49,7 +53,8 @@ function fastConfig() {
 }
 
 async function deployForkFixture() {
-  const [owner, treasury, requester, alice, bob, carol] = await ethers.getSigners();
+  const [owner, treasury, requester, alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy] = await ethers.getSigners();
+  const reviewerSigners = [alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy];
 
   const USDAIO = await ethers.getContractFactory("USDAIOToken");
   const usdaio = await USDAIO.deploy(owner.address);
@@ -140,9 +145,8 @@ async function deployForkFixture() {
   const vrfProof = Array.from(await vrfVerifier.decodeProof(vrfVector.pi));
 
   const stake = ethers.parseEther("1000");
-  const reviewers = [alice, bob, carol];
-  for (let i = 0; i < reviewers.length; i++) {
-    const reviewer = reviewers[i];
+  for (let i = 0; i < reviewerSigners.length; i++) {
+    const reviewer = reviewerSigners[i];
     await usdaio.mint(reviewer.address, stake);
     await usdaio.connect(reviewer).approve(await stakeVault.getAddress(), stake);
     await reviewerRegistry
@@ -153,7 +157,97 @@ async function deployForkFixture() {
   await usdaio.mint(requester.address, ethers.parseEther("1000"));
   await usdaio.connect(requester).approve(await paymentRouter.getAddress(), ethers.parseEther("1000"));
 
-  return { requester, alice, bob, carol, commitReveal, paymentRouter, core, vrfProof };
+  return { requester, reviewers: reviewerSigners, reviewerRegistry, vrfCoordinator, commitReveal, paymentRouter, core, vrfProof };
+}
+
+function sortitionScore(phase, requestId, participant, subject, randomness) {
+  return (
+    BigInt(
+      ethers.keccak256(
+        ethers.AbiCoder.defaultAbiCoder().encode(
+          ["bytes32", "uint256", "address", "address", "bytes32"],
+          [phase, requestId, participant, subject, randomness]
+        )
+      )
+    ) % SCALE
+  );
+}
+
+async function sortitionPass(fixture, requestId, phase, epoch, reviewer, target, phaseStartedBlock, finalityFactor) {
+  const targetAddress = target ? target.address : ethers.ZeroAddress;
+  const publicKey = Array.from(await fixture.reviewerRegistry.vrfPublicKey(reviewer.address));
+  const randomness = await fixture.vrfCoordinator.randomness(
+    publicKey,
+    fixture.vrfProof,
+    await fixture.core.getAddress(),
+    requestId,
+    phase,
+    epoch,
+    reviewer.address,
+    targetAddress,
+    phaseStartedBlock,
+    finalityFactor
+  );
+  return sortitionScore(phase, requestId, reviewer.address, targetAddress, randomness) < ELECTION_DIFFICULTY;
+}
+
+async function findReviewPairForCurrentPhase(fixture, requestId) {
+  const lifecycle = await fixture.core.getRequestLifecycle(requestId);
+  const reviewPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
+  const auditPhaseStartedBlock = reviewPhaseStartedBlock + 4n;
+
+  for (let i = 0; i < fixture.reviewers.length; i++) {
+    for (let j = 0; j < fixture.reviewers.length; j++) {
+      if (i === j) continue;
+      const first = fixture.reviewers[i];
+      const second = fixture.reviewers[j];
+      const firstReviewPass = await sortitionPass(
+        fixture,
+        requestId,
+        REVIEW_SORTITION,
+        lifecycle.committeeEpoch,
+        first,
+        null,
+        reviewPhaseStartedBlock,
+        2
+      );
+      if (!firstReviewPass) continue;
+      const secondReviewPass = await sortitionPass(
+        fixture,
+        requestId,
+        REVIEW_SORTITION,
+        lifecycle.committeeEpoch,
+        second,
+        null,
+        reviewPhaseStartedBlock,
+        2
+      );
+      if (!secondReviewPass) continue;
+      const firstAuditPass = await sortitionPass(
+        fixture,
+        requestId,
+        AUDIT_SORTITION,
+        lifecycle.auditEpoch,
+        first,
+        second,
+        auditPhaseStartedBlock,
+        2
+      );
+      if (!firstAuditPass) continue;
+      const secondAuditPass = await sortitionPass(
+        fixture,
+        requestId,
+        AUDIT_SORTITION,
+        lifecycle.auditEpoch,
+        second,
+        first,
+        auditPhaseStartedBlock,
+        2
+      );
+      if (secondAuditPass) return [first, second];
+    }
+  }
+  throw new Error("No reviewer pair passes review and audit sortition in this phase");
 }
 
 async function review(commitReveal, requestId, reviewer, score, uri, label, vrfProof) {
@@ -168,12 +262,12 @@ async function audit(commitReveal, requestId, auditor, targets, scores, label, v
   const seed = BigInt(ethers.id(`${label}:audit`));
   const targetAddresses = targets.map((target) => target.address);
   const resultHash = await commitReveal.hashAuditReveal(requestId, auditor.address, targetAddresses, scores);
-  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, [vrfProof, vrfProof]);
+  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, [vrfProof]);
   return { targets: targetAddresses, scores, seed };
 }
 
 describeFork("Sepolia fork E2E", function () {
-  this.timeout(120000);
+  this.timeout(240000);
 
   before(async function () {
     await network.provider.request({
@@ -187,28 +281,26 @@ describeFork("Sepolia fork E2E", function () {
       expect(await ethers.provider.getCode(address)).to.not.equal("0x");
     }
 
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, core, vrfProof } = await deployForkFixture();
+    const fixture = await deployForkFixture();
+    const { requester, commitReveal, paymentRouter, core, vrfProof } = fixture;
     await paymentRouter
       .connect(requester)
       .createRequestWithUSDAIO("ipfs://fork-proposal", ethers.id("fork-proposal"), ethers.id("fork-rubric"), DOMAIN_RESEARCH, FAST, 0);
     const requestId = 1n;
 
     await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId);
     const aliceReview = await review(commitReveal, requestId, alice, 8000, "ipfs://fork-alice", "alice", vrfProof);
     const bobReview = await review(commitReveal, requestId, bob, 6000, "ipfs://fork-bob", "bob", vrfProof);
-    const carolReview = await review(commitReveal, requestId, carol, 2000, "ipfs://fork-carol", "carol", vrfProof);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.score, aliceReview.reportHash, aliceReview.uri, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.score, bobReview.reportHash, bobReview.uri, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.score, carolReview.reportHash, carolReview.uri, carolReview.seed);
 
-    const aliceAudit = await audit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice", vrfProof);
-    const bobAudit = await audit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob", vrfProof);
-    const carolAudit = await audit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol", vrfProof);
+    const aliceAudit = await audit(commitReveal, requestId, alice, [bob], [7000], "alice", vrfProof);
+    const bobAudit = await audit(commitReveal, requestId, bob, [alice], [9000], "bob", vrfProof);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
     await core.finalizeRequest(requestId);
 
     const result = await core.getRequestFinalResult(requestId);

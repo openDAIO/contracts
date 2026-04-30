@@ -10,8 +10,13 @@ const CRITICAL = 2;
 const FINALIZED = 6n;
 const QUEUED = 1n;
 const REVIEW_COMMIT = 2n;
+const REVIEW_REVEAL = 3n;
 const AUDIT_COMMIT = 4n;
 const UNRESOLVED = 9n;
+const SCALE = 10000n;
+const ELECTION_DIFFICULTY = 5000n;
+const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
+const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
 
 function tierConfig({
   reviewCommitQuorum,
@@ -36,8 +41,8 @@ function tierConfig({
   auditRevealTimeout
 }) {
   return {
-    reviewElectionDifficulty: 10000,
-    auditElectionDifficulty: 10000,
+    reviewElectionDifficulty: Number(ELECTION_DIFFICULTY),
+    auditElectionDifficulty: Number(ELECTION_DIFFICULTY),
     reviewCommitQuorum,
     reviewRevealQuorum,
     auditCommitQuorum,
@@ -65,7 +70,8 @@ function tierConfig({
 
 describe("DAIOCore", function () {
   async function deployFixture() {
-    const [owner, treasury, requester, alice, bob, carol] = await ethers.getSigners();
+    const [owner, treasury, requester, alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy] = await ethers.getSigners();
+    const reviewerSigners = [alice, bob, carol, dave, erin, frank, grace, heidi, ivan, judy];
 
     const USDAIO = await ethers.getContractFactory("USDAIOToken");
     const usdaio = await USDAIO.deploy(owner.address);
@@ -139,10 +145,10 @@ describe("DAIOCore", function () {
     await core.setTierConfig(
       FAST,
       tierConfig({
-        reviewCommitQuorum: 3,
-        reviewRevealQuorum: 3,
-        auditCommitQuorum: 3,
-        auditRevealQuorum: 3,
+        reviewCommitQuorum: 2,
+        reviewRevealQuorum: 2,
+        auditCommitQuorum: 2,
+        auditRevealQuorum: 2,
         auditTargetLimit: 2,
         minIncomingAudit: 1,
         auditCoverageQuorum: 7000,
@@ -164,10 +170,10 @@ describe("DAIOCore", function () {
     await core.setTierConfig(
       STANDARD,
       tierConfig({
-        reviewCommitQuorum: 5,
-        reviewRevealQuorum: 4,
-        auditCommitQuorum: 4,
-        auditRevealQuorum: 4,
+        reviewCommitQuorum: 2,
+        reviewRevealQuorum: 2,
+        auditCommitQuorum: 2,
+        auditRevealQuorum: 2,
         auditTargetLimit: 3,
         minIncomingAudit: 2,
         auditCoverageQuorum: 8000,
@@ -189,10 +195,10 @@ describe("DAIOCore", function () {
     await core.setTierConfig(
       CRITICAL,
       tierConfig({
-        reviewCommitQuorum: 3,
-        reviewRevealQuorum: 3,
-        auditCommitQuorum: 3,
-        auditRevealQuorum: 3,
+        reviewCommitQuorum: 2,
+        reviewRevealQuorum: 2,
+        auditCommitQuorum: 2,
+        auditRevealQuorum: 2,
         auditTargetLimit: 2,
         minIncomingAudit: 3,
         auditCoverageQuorum: 10000,
@@ -242,7 +248,7 @@ describe("DAIOCore", function () {
     const reviewerStake = ethers.parseEther("1000");
     const requesterFunds = ethers.parseEther("1000");
 
-    for (const reviewer of [alice, bob, carol]) {
+    for (const reviewer of reviewerSigners) {
       await usdaio.mint(reviewer.address, reviewerStake);
       await usdaio.connect(reviewer).approve(await stakeVault.getAddress(), reviewerStake);
     }
@@ -250,15 +256,13 @@ describe("DAIOCore", function () {
     await usdaio.mint(requester.address, requesterFunds);
     await usdaio.connect(requester).approve(await paymentRouter.getAddress(), requesterFunds);
 
-    await reviewerRegistry
-      .connect(alice)
-      .registerReviewer("alice.daio.eth", ethers.id("alice.daio.eth"), 1001, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
-    await reviewerRegistry
-      .connect(bob)
-      .registerReviewer("bob.daio.eth", ethers.id("bob.daio.eth"), 1002, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
-    await reviewerRegistry
-      .connect(carol)
-      .registerReviewer("carol.daio.eth", ethers.id("carol.daio.eth"), 1003, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
+    for (let i = 0; i < reviewerSigners.length; i++) {
+      const reviewer = reviewerSigners[i];
+      const ensName = `reviewer-${i}.daio.eth`;
+      await reviewerRegistry
+        .connect(reviewer)
+        .registerReviewer(ensName, ethers.id(ensName), 1001 + i, DOMAIN_RESEARCH, vrfPublicKey, reviewerStake);
+    }
 
     return {
       owner,
@@ -267,6 +271,7 @@ describe("DAIOCore", function () {
       alice,
       bob,
       carol,
+      reviewers: reviewerSigners,
       usdaio,
       stakeVault,
       reviewerRegistry,
@@ -274,6 +279,7 @@ describe("DAIOCore", function () {
       commitReveal,
       paymentRouter,
       priorityQueue,
+      vrfCoordinator,
       vrfProof,
       core
     };
@@ -284,6 +290,123 @@ describe("DAIOCore", function () {
       .connect(requester)
       .createRequestWithUSDAIO(`ipfs://${label}`, ethers.id(label), ethers.id(`${label}:rubric`), DOMAIN_RESEARCH, tier, priorityFee);
     return 1n;
+  }
+
+  function sortitionScore(phase, requestId, participant, subject, randomness) {
+    return (
+      BigInt(
+        ethers.keccak256(
+          ethers.AbiCoder.defaultAbiCoder().encode(
+            ["bytes32", "uint256", "address", "address", "bytes32"],
+            [phase, requestId, participant, subject, randomness]
+          )
+        )
+      ) % SCALE
+    );
+  }
+
+  async function sortitionPass(fixture, requestId, phase, epoch, reviewer, target, phaseStartedBlock, finalityFactor) {
+    const targetAddress = target ? target.address : ethers.ZeroAddress;
+    const publicKey = Array.from(await fixture.reviewerRegistry.vrfPublicKey(reviewer.address));
+    const randomness = await fixture.vrfCoordinator.randomness(
+      publicKey,
+      fixture.vrfProof,
+      await fixture.core.getAddress(),
+      requestId,
+      phase,
+      epoch,
+      reviewer.address,
+      targetAddress,
+      phaseStartedBlock,
+      finalityFactor
+    );
+    return sortitionScore(phase, requestId, reviewer.address, targetAddress, randomness) < ELECTION_DIFFICULTY;
+  }
+
+  async function findReviewPairForCurrentPhase(fixture, requestId, reviewers, finalityFactor = 2n, requireNewFrom = undefined) {
+    const lifecycle = await fixture.core.getRequestLifecycle(requestId);
+    const reviewPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
+    const auditPhaseStartedBlock = reviewPhaseStartedBlock + 4n;
+
+    for (let i = 0; i < reviewers.length; i++) {
+      for (let j = 0; j < reviewers.length; j++) {
+        if (i === j) continue;
+        const first = reviewers[i];
+        const second = reviewers[j];
+        const firstReviewPass = await sortitionPass(
+          fixture,
+          requestId,
+          REVIEW_SORTITION,
+          lifecycle.committeeEpoch,
+          first,
+          null,
+          reviewPhaseStartedBlock,
+          finalityFactor
+        );
+        if (!firstReviewPass) continue;
+
+        const secondReviewPass = await sortitionPass(
+          fixture,
+          requestId,
+          REVIEW_SORTITION,
+          lifecycle.committeeEpoch,
+          second,
+          null,
+          reviewPhaseStartedBlock,
+          finalityFactor
+        );
+        if (!secondReviewPass) continue;
+
+        const firstAuditPass = await sortitionPass(
+          fixture,
+          requestId,
+          AUDIT_SORTITION,
+          lifecycle.auditEpoch,
+          first,
+          second,
+          auditPhaseStartedBlock,
+          finalityFactor
+        );
+        if (!firstAuditPass) continue;
+
+        const secondAuditPass = await sortitionPass(
+          fixture,
+          requestId,
+          AUDIT_SORTITION,
+          lifecycle.auditEpoch,
+          second,
+          first,
+          auditPhaseStartedBlock,
+          finalityFactor
+        );
+        if (
+          secondAuditPass
+            && (!requireNewFrom || !requireNewFrom.has(first.address) || !requireNewFrom.has(second.address))
+        ) {
+          return [first, second];
+        }
+      }
+    }
+    throw new Error("No reviewer pair passes review and audit sortition in this phase");
+  }
+
+  async function findNonSelectedReviewer(fixture, requestId, reviewers, finalityFactor = 2n) {
+    const lifecycle = await fixture.core.getRequestLifecycle(requestId);
+    const phaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
+    for (const reviewer of reviewers) {
+      const pass = await sortitionPass(
+        fixture,
+        requestId,
+        REVIEW_SORTITION,
+        lifecycle.committeeEpoch,
+        reviewer,
+        null,
+        phaseStartedBlock,
+        finalityFactor
+      );
+      if (!pass) return reviewer;
+    }
+    throw new Error("Every reviewer passed review sortition in this phase");
   }
 
   async function buildReviewCommit(commitReveal, requestId, reviewer, proposalScore, reportURI, saltLabel) {
@@ -304,82 +427,87 @@ describe("DAIOCore", function () {
     await commitReveal.connect(reviewer).commitReview(requestId, review.resultHash, review.seed, vrfProof);
   }
 
-  function auditProofs(vrfProof, reviewerCount = 3) {
+  function auditProofs(vrfProof, reviewerCount = 2) {
     return Array.from({ length: reviewerCount - 1 }, () => vrfProof);
   }
 
-  async function commitAudit(commitReveal, auditor, requestId, audit, vrfProof, reviewerCount = 3) {
+  async function commitAudit(commitReveal, auditor, requestId, audit, vrfProof, reviewerCount = 2) {
     await commitReveal.connect(auditor).commitAudit(requestId, audit.resultHash, audit.seed, auditProofs(vrfProof, reviewerCount));
   }
 
-  it("runs the post-audit scoring and settlement path", async function () {
-    const { requester, alice, bob, carol, usdaio, commitReveal, paymentRouter, vrfProof, core, reputationLedger } =
-      await deployFixture();
-    const requestId = await createRequest(paymentRouter, requester, FAST);
-
+  async function enterAuditCommitWithSelectedPair(fixture, requestId) {
+    const { commitReveal, vrfProof, core } = fixture;
     await core.startNextRequest();
-
-    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
-    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers);
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", `alice-${requestId}`);
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", `bob-${requestId}`);
 
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
 
-    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
-    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
-    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+    return { alice, bob, aliceReview, bobReview };
+  }
+
+  it("runs the post-audit scoring and settlement path", async function () {
+    const fixture = await deployFixture();
+    const { requester, usdaio, commitReveal, paymentRouter, vrfProof, core, reputationLedger } = fixture;
+    const requestId = await createRequest(paymentRouter, requester, FAST);
+
+    await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers);
+
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
+
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+
+    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
+    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
+
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [9000], "bob");
 
     await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
-    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
 
     const aliceBalanceBefore = await usdaio.balanceOf(alice.address);
     const bobBalanceBefore = await usdaio.balanceOf(bob.address);
-    const carolBalanceBefore = await usdaio.balanceOf(carol.address);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
 
     await core.finalizeRequest(requestId);
 
     const result = await core.getRequestFinalResult(requestId);
     const aliceResult = await core.getReviewerResult(requestId, alice.address);
     const bobResult = await core.getReviewerResult(requestId, bob.address);
-    const carolResult = await core.getReviewerResult(requestId, carol.address);
 
     expect(result.status).to.equal(FINALIZED);
-    expect(result.finalProposalScore).to.equal(6000n);
+    expect(result.finalProposalScore).to.equal(8000n);
     expect(result.auditCoverage).to.equal(10000n);
     expect(result.lowConfidence).to.equal(false);
-    expect(result.confidence).to.equal(8000n);
+    expect(result.confidence).to.equal(9000n);
 
-    expect(aliceResult.reportQualityMedian).to.equal(8900n);
-    expect(bobResult.reportQualityMedian).to.equal(7100n);
-    expect(carolResult.reportQualityMedian).to.equal(4250n);
+    expect(aliceResult.reportQualityMedian).to.equal(9000n);
+    expect(bobResult.reportQualityMedian).to.equal(7000n);
 
     expect(aliceResult.normalizedReportQuality).to.equal(10000n);
-    expect(bobResult.normalizedReportQuality).to.equal(7977n);
-    expect(carolResult.normalizedReportQuality).to.equal(4775n);
+    expect(bobResult.normalizedReportQuality).to.equal(7777n);
 
-    expect(aliceResult.finalContribution).to.equal(9417n);
-    expect(bobResult.finalContribution).to.equal(7977n);
-    expect(carolResult.finalContribution).to.equal(4775n);
+    expect(aliceResult.finalContribution).to.equal(10000n);
+    expect(bobResult.finalContribution).to.equal(7777n);
 
     expect(await usdaio.balanceOf(alice.address)).to.be.gt(aliceBalanceBefore);
     expect(await usdaio.balanceOf(bob.address)).to.be.gt(bobBalanceBefore);
-    expect(await usdaio.balanceOf(carol.address)).to.be.gt(carolBalanceBefore);
     expect(await core.treasuryBalance()).to.be.gte(ethers.parseEther("10"));
 
     const aliceReputation = await reputationLedger.reputations(alice.address);
     expect(aliceReputation.samples).to.equal(1n);
-    expect(aliceReputation.finalContribution).to.equal(9417n);
+    expect(aliceReputation.finalContribution).to.equal(10000n);
   });
 
   it("starts the highest priority queued request first", async function () {
@@ -414,6 +542,24 @@ describe("DAIOCore", function () {
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_COMMIT);
   });
 
+  it("slashes valid proofs that do not pass the 50% review sortition", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
+    const requestId = await createRequest(paymentRouter, requester, FAST);
+
+    await core.startNextRequest();
+    const reviewer = await findNonSelectedReviewer(fixture, requestId, fixture.reviewers);
+    const review = await buildReviewCommit(commitReveal, requestId, reviewer, 8000, "ipfs://report-not-selected", "not-selected");
+    const stakeBefore = (await reviewerRegistry.getReviewer(reviewer.address)).stake;
+
+    await commitReveal.connect(reviewer).commitReview(requestId, review.resultHash, review.seed, vrfProof);
+
+    const stakeAfter = (await reviewerRegistry.getReviewer(reviewer.address)).stake;
+    expect(stakeAfter).to.be.lt(stakeBefore);
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_COMMIT);
+    expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
+  });
+
   it("requeues Standard requests once on review commit timeout", async function () {
     const { requester, paymentRouter, core } = await deployFixture();
     const priorityFee = ethers.parseEther("3");
@@ -431,62 +577,90 @@ describe("DAIOCore", function () {
     expect(request.activePriority).to.equal(priorityFee - 1n);
   });
 
+  it("admits newly selected reviewers after the retry epoch changes", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, vrfProof, core } = fixture;
+    const priorityFee = ethers.parseEther("2");
+    const requestId = await createRequest(paymentRouter, requester, STANDARD, priorityFee, "standard-retry-selection");
+
+    await core.startNextRequest();
+    const initialLifecycle = await core.getRequestLifecycle(requestId);
+    const initialPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
+    const initiallySelected = new Set();
+    for (const reviewer of fixture.reviewers) {
+      const pass = await sortitionPass(
+        fixture,
+        requestId,
+        REVIEW_SORTITION,
+        initialLifecycle.committeeEpoch,
+        reviewer,
+        null,
+        initialPhaseStartedBlock,
+        3
+      );
+      if (pass) initiallySelected.add(reviewer.address);
+    }
+
+    await time.increase(2 * 60 * 60 + 1);
+    await core.handleTimeout(requestId);
+    await core.startNextRequest();
+
+    const retryLifecycle = await core.getRequestLifecycle(requestId);
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers, 3n, initiallySelected);
+    expect(retryLifecycle.retryCount).to.equal(1n);
+    expect(retryLifecycle.committeeEpoch).to.be.gt(initialLifecycle.committeeEpoch);
+    expect(!initiallySelected.has(alice.address) || !initiallySelected.has(bob.address)).to.equal(true);
+
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://retry-alice", "retry-alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://retry-bob", "retry-bob");
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_REVEAL);
+  });
+
   it("slashes missed review reveals and continues Fast requests as low-confidence", async function () {
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
     await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers);
 
     const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
     const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
 
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
-    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
 
-    const carolStakeBefore = (await reviewerRegistry.getReviewer(carol.address)).stake;
+    const bobStakeBefore = (await reviewerRegistry.getReviewer(bob.address)).stake;
 
     await time.increase(30 * 60 + 1);
     await core.handleTimeout(requestId);
 
     const request = await core.getRequestLifecycle(requestId);
-    const carolStakeAfter = (await reviewerRegistry.getReviewer(carol.address)).stake;
+    const bobStakeAfter = (await reviewerRegistry.getReviewer(bob.address)).stake;
 
     expect(request.status).to.equal(AUDIT_COMMIT);
     expect(request.lowConfidence).to.equal(true);
-    expect(carolStakeAfter).to.be.lt(carolStakeBefore);
+    expect(bobStakeAfter).to.be.lt(bobStakeBefore);
     expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
   });
 
   it("slashes and ignores non-canonical self-audit reveals", async function () {
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
-    await core.startNextRequest();
-
-    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
-    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
-
-    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
-    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
-
-    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
-    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
+    const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
 
     const badAudit = await buildAuditCommit(commitReveal, requestId, alice, [alice], [9000], "alice-self");
-    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
-    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [9000], "bob");
 
     await commitAudit(commitReveal, alice, requestId, badAudit, vrfProof);
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
-    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
 
     const stakeBefore = (await reviewerRegistry.getReviewer(alice.address)).stake;
 
@@ -501,29 +675,18 @@ describe("DAIOCore", function () {
   });
 
   it("slashes invalid target-specific audit VRF proofs without accepting the audit commit", async function () {
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
-    await core.startNextRequest();
+    const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
 
-    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
-    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
-
-    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
-    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
-
-    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
-    await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
-
-    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
     const badProof = [...vrfProof];
     badProof[0] = 0n;
     const stakeBefore = (await reviewerRegistry.getReviewer(alice.address)).stake;
 
-    await commitReveal.connect(alice).commitAudit(requestId, aliceAudit.resultHash, aliceAudit.seed, [badProof, vrfProof]);
+    await commitReveal.connect(alice).commitAudit(requestId, aliceAudit.resultHash, aliceAudit.seed, [badProof]);
 
     const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
     expect(stakeAfter).to.be.lt(stakeBefore);
@@ -531,71 +694,63 @@ describe("DAIOCore", function () {
   });
 
   it("locks accepted reviewer stake until settlement", async function () {
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
     await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers);
 
     const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
     const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
 
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(ethers.parseEther("1000"));
     await expect(reviewerRegistry.connect(alice).withdrawStake(1)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
 
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
 
-    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
-    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
-    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [9000], "bob");
 
     await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
-    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
     await core.finalizeRequest(requestId);
 
     expect(await reviewerRegistry.lockedStake(alice.address)).to.equal(0n);
   });
 
   it("marks Critical requests unresolved instead of finalizing below coverage quorum", async function () {
-    const { requester, alice, bob, carol, commitReveal, paymentRouter, vrfProof, core } = await deployFixture();
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, CRITICAL, 0n, "critical-low-coverage");
 
     await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers);
 
     const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://report-alice", "alice");
     const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://report-bob", "bob");
-    const carolReview = await buildReviewCommit(commitReveal, requestId, carol, 2000, "ipfs://report-carol", "carol");
 
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
-    await commitReview(commitReveal, carol, requestId, carolReview, vrfProof);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
-    await commitReveal.connect(carol).revealReview(requestId, carolReview.proposalScore, carolReview.reportHash, carolReview.reportURI, carolReview.seed);
 
-    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob, carol], [7000, 4000], "alice");
-    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice, carol], [9000, 4500], "bob");
-    const carolAudit = await buildAuditCommit(commitReveal, requestId, carol, [alice, bob], [8800, 7200], "carol");
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [9000], "bob");
 
     await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
-    await commitAudit(commitReveal, carol, requestId, carolAudit, vrfProof);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
-    await commitReveal.connect(carol).revealAudit(requestId, carolAudit.targets, carolAudit.scores, carolAudit.seed);
     await core.finalizeRequest(requestId);
 
     const result = await core.getRequestFinalResult(requestId);
