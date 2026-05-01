@@ -34,6 +34,7 @@ contract DAIOAutoConvertHook is BaseHook {
     event IntentRegistered(bytes32 indexed intentHash, address indexed paymentToken, uint256 requiredUsdaio);
     event IntentSet(bytes32 indexed intentHash, bool allowed);
     event IntentWriterSet(address indexed writer, bool allowed);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     event PoolSet(bytes32 indexed poolKey, bool allowed);
     event PaymentRouterUpdated(address indexed paymentRouter);
     event RouterSet(address indexed router, bool allowed);
@@ -54,6 +55,7 @@ contract DAIOAutoConvertHook is BaseHook {
         paymentRouter = paymentRouter_;
         usdaio = Currency.wrap(usdaio_);
         intentWriters[paymentRouter_] = true;
+        emit OwnershipTransferred(address(0), owner_);
         emit PaymentRouterUpdated(paymentRouter_);
         emit IntentWriterSet(paymentRouter_, true);
     }
@@ -78,6 +80,12 @@ contract DAIOAutoConvertHook is BaseHook {
     }
 
     function validateHookAddress(BaseHook) internal pure override {}
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "DAIOAutoConvertHook: bad owner");
+        emit OwnershipTransferred(owner, newOwner);
+        owner = newOwner;
+    }
 
     function setPaymentRouter(address newPaymentRouter) external onlyOwner {
         require(newPaymentRouter != address(0), "DAIOAutoConvertHook: bad router");

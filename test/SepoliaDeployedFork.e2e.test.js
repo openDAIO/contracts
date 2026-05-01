@@ -1,11 +1,13 @@
 const { expect } = require("chai");
-const { artifacts, ethers, network } = require("hardhat");
-const vrfData = require("../lib/vrf-solidity/test/data.json");
+const { ethers, network } = require("hardhat");
+const crypto = require("crypto");
+const { ec: EC } = require("elliptic");
+const BN = require("bn.js");
 
 const RUN_DEPLOYED_FORK = process.env.RUN_SEPOLIA_DEPLOYED_FORK === "true";
 const describeDeployedFork = RUN_DEPLOYED_FORK ? describe : describe.skip;
 const FORK_URL = process.env.SEPOLIA_RPC_URL || process.env.HARDHAT_FORK_URL || "https://sepolia.drpc.org";
-const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10769290");
+const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10769790");
 
 const DEPLOYER = "0x2f149CaA0e931e13f6F32bd3E46eFc6e96bcC36A";
 const DOMAIN_RESEARCH = 1;
@@ -16,9 +18,11 @@ const SCALE = 10000n;
 const ROUND_REVIEW = 0;
 const ROUND_AUDIT_CONSENSUS = 1;
 const ROUND_REPUTATION_FINAL = 2;
-const ELECTION_DIFFICULTY = 5000n;
+const ELECTION_DIFFICULTY = 10000n;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
 const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
+const SECP256K1 = new EC("secp256k1");
+const SECP256K1_N = SECP256K1.curve.n;
 
 function fastConfig() {
   return {
@@ -91,6 +95,96 @@ function sortitionScore(phase, requestId, participant, subject, randomness) {
       )
     ) % SCALE
   );
+}
+
+function sha256(bytes) {
+  return crypto.createHash("sha256").update(bytes).digest();
+}
+
+function bn32(value) {
+  return value.toArrayLike(Buffer, "be", 32);
+}
+
+function pointBytes(point) {
+  return Buffer.concat([Buffer.from([point.getY().isOdd() ? 3 : 2]), bn32(point.getX())]);
+}
+
+function bnToBigInt(value) {
+  return BigInt(`0x${bn32(value).toString("hex")}`);
+}
+
+function hashToTryAndIncrement(publicKeyPoint, message) {
+  const base = Buffer.concat([Buffer.from([254, 1]), pointBytes(publicKeyPoint), Buffer.from(message)]);
+  for (let counter = 0; counter < 256; counter++) {
+    const x = new BN(sha256(Buffer.concat([base, Buffer.from([counter])])));
+    try {
+      return SECP256K1.curve.pointFromX(x, false);
+    } catch {
+      // Try-and-increment keeps looking until the x coordinate maps to the curve.
+    }
+  }
+  throw new Error("No valid VRF hash point was found");
+}
+
+function hashPoints(hashPoint, gamma, uPoint, vPoint) {
+  return new BN(
+    sha256(Buffer.concat([Buffer.from([254, 2]), pointBytes(hashPoint), pointBytes(gamma), pointBytes(uPoint), pointBytes(vPoint)])).subarray(0, 16)
+  );
+}
+
+function privateKeyFor(index) {
+  return new BN(index + 1);
+}
+
+function publicKeyFor(privateKey) {
+  const publicKey = SECP256K1.g.mul(privateKey);
+  return [bnToBigInt(publicKey.getX()), bnToBigInt(publicKey.getY())];
+}
+
+function realVrfProof(privateKey, message) {
+  const publicKeyPoint = SECP256K1.g.mul(privateKey);
+  const hashPoint = hashToTryAndIncrement(publicKeyPoint, ethers.getBytes(message));
+  const gamma = hashPoint.mul(privateKey);
+  const nonce = new BN(sha256(Buffer.concat([Buffer.from("DAIO test VRF nonce"), bn32(privateKey), Buffer.from(ethers.getBytes(message))])))
+    .umod(SECP256K1_N.subn(1))
+    .addn(1);
+  const uPoint = SECP256K1.g.mul(nonce);
+  const vPoint = hashPoint.mul(nonce);
+  const c = hashPoints(hashPoint, gamma, uPoint, vPoint);
+  const s = nonce.add(c.mul(privateKey)).umod(SECP256K1_N);
+  return [bnToBigInt(gamma.getX()), bnToBigInt(gamma.getY()), bnToBigInt(c), bnToBigInt(s)];
+}
+
+async function proofForDeployedCoordinator(contracts, privateKey, requestId, phase, epoch, reviewer, target, phaseStartedBlock, finalityFactor) {
+  const targetAddress = target ? target.address : ethers.ZeroAddress;
+  const publicKey = publicKeyFor(privateKey);
+  const message = await contracts.vrfCoordinator.messageFor(
+    DEPLOYED.core,
+    requestId,
+    phase,
+    epoch,
+    reviewer.address,
+    targetAddress,
+    phaseStartedBlock,
+    finalityFactor
+  );
+  const proof = realVrfProof(privateKey, message);
+  expect(await contracts.vrfVerifier.verify(publicKey, proof, message)).to.equal(true);
+
+  const randomness = await contracts.vrfCoordinator.randomness(
+    publicKey,
+    proof,
+    DEPLOYED.core,
+    requestId,
+    phase,
+    epoch,
+    reviewer.address,
+    targetAddress,
+    phaseStartedBlock,
+    finalityFactor
+  );
+  expect(sortitionScore(phase, requestId, reviewer.address, targetAddress, randomness)).to.be.lt(ELECTION_DIFFICULTY);
+  return proof;
 }
 
 async function impersonate(address) {
@@ -290,16 +384,15 @@ describeDeployedFork("Sepolia deployed-address fork E2E", function () {
     const owner = await impersonate(DEPLOYER);
     const signers = await ethers.getSigners();
     const requester = signers[1];
-    const reviewerCandidates = signers.slice(2);
+    const [alice, bob] = signers.slice(2);
+    const aliceVrfKey = privateKeyFor(0);
+    const bobVrfKey = privateKeyFor(1);
+    const aliceVrfPublicKey = publicKeyFor(aliceVrfKey);
+    const bobVrfPublicKey = publicKeyFor(bobVrfKey);
+    const finalityFactor = fastConfig().finalityFactor;
 
     await contracts.reviewerRegistry.connect(owner).setIdentityModules(ethers.ZeroAddress, ethers.ZeroAddress);
     await contracts.core.connect(owner).setTierConfig(FAST, fastConfig());
-    const mockVrf = await artifacts.readArtifact("MockVRFCoordinator");
-    await network.provider.request({ method: "hardhat_setCode", params: [DEPLOYED.vrfCoordinator, mockVrf.deployedBytecode] });
-
-    const vrfVector = vrfData.verify.valid[0];
-    const vrfPublicKey = Array.from(await contracts.vrfVerifier.decodePoint(vrfVector.pub));
-    const vrfProof = Array.from(await contracts.vrfVerifier.decodeProof(vrfVector.pi));
     const stake = ethers.parseEther("1000");
 
     const priorityFee = ethers.parseEther("1");
@@ -321,26 +414,74 @@ describeDeployedFork("Sepolia deployed-address fork E2E", function () {
     latest = await contracts.paymentRouter.latestRequestState(requester.address);
     expect(latest.status).to.equal(REVIEW_COMMIT);
 
-    const chainId = (await ethers.provider.getNetwork()).chainId;
-    const fixture = { ...contracts, reviewers: reviewerCandidates, vrfPublicKey, vrfProof, chainId, useOnchainSortition: true };
-    const [alice, bob] = await findReviewPairForPhase(fixture, requestId, BigInt(startReceipt.blockNumber));
     for (const [index, reviewer] of [alice, bob].entries()) {
+      const publicKey = index === 0 ? aliceVrfPublicKey : bobVrfPublicKey;
       await contracts.usdaio.connect(owner).mint(reviewer.address, stake);
       await contracts.usdaio.connect(reviewer).approve(DEPLOYED.stakeVault, stake);
       await contracts.reviewerRegistry
         .connect(reviewer)
-        .registerReviewer(`${reviewer.address}.deployed.daio.eth`, ethers.keccak256(ethers.toUtf8Bytes(reviewer.address)), 10_001 + index, DOMAIN_RESEARCH, vrfPublicKey, stake);
+        .registerReviewer(`${reviewer.address}.deployed.daio.eth`, ethers.keccak256(ethers.toUtf8Bytes(reviewer.address)), 10_001 + index, DOMAIN_RESEARCH, publicKey, stake);
     }
 
-    const aliceReview = await review(contracts.commitReveal, requestId, alice, 8000, "ipfs://deployed-alice", "alice", vrfProof);
-    const bobReview = await review(contracts.commitReveal, requestId, bob, 6000, "ipfs://deployed-bob", "bob", vrfProof);
+    const lifecycleAfterStart = await contracts.core.getRequestLifecycle(requestId);
+    const reviewPhaseStartedBlock = BigInt(startReceipt.blockNumber);
+    const aliceReviewProof = await proofForDeployedCoordinator(
+      contracts,
+      aliceVrfKey,
+      requestId,
+      REVIEW_SORTITION,
+      lifecycleAfterStart.committeeEpoch,
+      alice,
+      null,
+      reviewPhaseStartedBlock,
+      finalityFactor
+    );
+    const bobReviewProof = await proofForDeployedCoordinator(
+      contracts,
+      bobVrfKey,
+      requestId,
+      REVIEW_SORTITION,
+      lifecycleAfterStart.committeeEpoch,
+      bob,
+      null,
+      reviewPhaseStartedBlock,
+      finalityFactor
+    );
+
+    const aliceReview = await review(contracts.commitReveal, requestId, alice, 8000, "ipfs://deployed-alice", "alice", aliceReviewProof);
+    const bobReview = await review(contracts.commitReveal, requestId, bob, 6000, "ipfs://deployed-bob", "bob", bobReviewProof);
     expect(await contracts.commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     await contracts.commitReveal.connect(alice).revealReview(requestId, aliceReview.score, aliceReview.reportHash, aliceReview.uri, aliceReview.seed);
-    await contracts.commitReveal.connect(bob).revealReview(requestId, bobReview.score, bobReview.reportHash, bobReview.uri, bobReview.seed);
+    const bobRevealTx = await contracts.commitReveal.connect(bob).revealReview(requestId, bobReview.score, bobReview.reportHash, bobReview.uri, bobReview.seed);
+    const bobRevealReceipt = await bobRevealTx.wait();
+    const lifecycleAfterReview = await contracts.core.getRequestLifecycle(requestId);
+    const auditPhaseStartedBlock = BigInt(bobRevealReceipt.blockNumber);
+    const aliceAuditProof = await proofForDeployedCoordinator(
+      contracts,
+      aliceVrfKey,
+      requestId,
+      AUDIT_SORTITION,
+      lifecycleAfterReview.auditEpoch,
+      alice,
+      bob,
+      auditPhaseStartedBlock,
+      finalityFactor
+    );
+    const bobAuditProof = await proofForDeployedCoordinator(
+      contracts,
+      bobVrfKey,
+      requestId,
+      AUDIT_SORTITION,
+      lifecycleAfterReview.auditEpoch,
+      bob,
+      alice,
+      auditPhaseStartedBlock,
+      finalityFactor
+    );
 
-    const aliceAudit = await audit(contracts.commitReveal, requestId, alice, [bob], [7000], "alice", vrfProof);
-    const bobAudit = await audit(contracts.commitReveal, requestId, bob, [alice], [9000], "bob", vrfProof);
+    const aliceAudit = await audit(contracts.commitReveal, requestId, alice, [bob], [7000], "alice", aliceAuditProof);
+    const bobAudit = await audit(contracts.commitReveal, requestId, bob, [alice], [9000], "bob", bobAuditProof);
     expect(await contracts.commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     await contracts.commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
