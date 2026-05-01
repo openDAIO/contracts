@@ -59,25 +59,25 @@ const SEPOLIA = {
 };
 
 const DEPLOYED = {
-  usdaio: "0x7F302FDD7787B9f910eb17D622f464e2069579a5",
-  stakeVault: "0xa176D7E4017d23731abbc3F1346d409EaDE758b9",
-  reviewerRegistry: "0xb7Ac502df1243bf1F8f0CF40Db94FC8CA7438750",
-  assignmentManager: "0x2b75393c25Eb25994FECF277bB2E7a64262da5b0",
-  consensusScoring: "0x4b4C039984eD8b10F5462E484eCC3699e6316a39",
-  settlement: "0x892965b210d2C7D992D04B9bbd24A3fB5424ad38",
-  reputationLedger: "0xdf7aED5a791D0Ad11Ff4bdF830596d867CbB2382",
-  commitReveal: "0xf0FfFD8a1eFddaC5D6338C0874723536f51908BB",
-  priorityQueue: "0x165896b4D193f31fD275d41Ae121af141B0eff16",
-  vrfVerifier: "0xCfedf4e7bDAfE887aBC448703463C7ee5203f1F7",
-  vrfCoordinator: "0x3C1a4a64CBa60606BF68f7232d8488d60f750f93",
-  core: "0x615739d66bf0cB1429401fbB71B737A59B53967C",
-  roundLedger: "0x4afb1cf2e243e5EFF1b9e6bF8ec70466BA7fFC36",
-  erc8004Adapter: "0x1aEeDB2bC6f9c0Db0C18066815c8066462dCD2bC",
-  acceptedTokenRegistry: "0x70C99D34ac5D90C5AaaA519A4a05daae81959A65",
-  swapAdapter: "0xf63f1d7F73Ce069217F3ef56dB743c00BD4eB821",
-  paymentRouter: "0x0c824cfa27C1F355DF3996B721AE30aE1C9d1920",
-  ensVerifier: "0x0A22019CB6EE37eD924334785850fc792a524dC8",
-  autoConvertHook: "0xDDEbF6068997502F80CD1dAe5AB5d5Dd9ED9C040"
+  usdaio: "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
+  stakeVault: "0x263091C8A7B28E5f0F71C3AE8F60823B0DcC8504",
+  reviewerRegistry: "0xE30531Df811b06d7D4eA6a799810112aE75635BE",
+  assignmentManager: "0x96E8D837978632D75Eb8eA242afD25B7eBf83FC8",
+  consensusScoring: "0xDd9dEd9e8a6b68cD1759299ce8EcD3b87577FdfA",
+  settlement: "0xB395CBBE231974167bB3d9B7e212C594f6932523",
+  reputationLedger: "0x9685500168e6C5D60f3f060A49DE6F57F9AC1E9A",
+  commitReveal: "0x29c3E89D3D3e198F8e62ead7A39F24375EC0A647",
+  priorityQueue: "0x8BDEA183c664E11c39Af5eF7948CE8cb46751117",
+  vrfVerifier: "0xdf50FA950b5Afd2D551D0D5CCbA88b8aE77c5786",
+  vrfCoordinator: "0x4040e3387115b81216301858168C6854038E5D28",
+  core: "0xb61D8921B8E310D06dD38C913e43928780830B56",
+  roundLedger: "0x6085A3371A420e5397E7edb34Dde0373BA5d00aE",
+  erc8004Adapter: "0x4CD72D5817b654A76e4000F1f84dC1A128Ac3649",
+  acceptedTokenRegistry: "0x98d00bc8Ddde42dfE4F3BA7fbAd23d6880c0c19d",
+  swapAdapter: "0xDa724BA5Eba473De3dc7dd38A686003637d694B3",
+  paymentRouter: "0xe90dd5A9C6962b6308d8a46422eF8bCE32D7E063",
+  ensVerifier: "0xEf175ad939f9bDDe284d41b779ccc13b1377530f",
+  autoConvertHook: "0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040"
 };
 
 function sortitionScore(phase, requestId, participant, subject, randomness) {
@@ -165,7 +165,7 @@ async function sortitionPass(fixture, requestId, phase, epoch, reviewer, target,
 
 async function findReviewPairForPhase(fixture, requestId, reviewPhaseStartedBlock) {
   const lifecycle = await fixture.core.getRequestLifecycle(requestId);
-  const auditPhaseStartedBlock = BigInt(reviewPhaseStartedBlock) + 4n;
+  const auditPhaseStartedBlock = BigInt(reviewPhaseStartedBlock) + 10n;
 
   for (let i = 0; i < fixture.reviewers.length; i++) {
     for (let j = 0; j < fixture.reviewers.length; j++) {

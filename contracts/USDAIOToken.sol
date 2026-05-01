@@ -57,7 +57,7 @@ contract USDAIOToken {
         return true;
     }
 
-    function mint(address to, uint256 value) external onlyOwner {
+    function mint(address to, uint256 value) external {
         if (to == address(0)) revert InvalidAddress();
 
         totalSupply += value;

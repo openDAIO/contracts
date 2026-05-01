@@ -134,15 +134,18 @@ contract ReviewerRegistry {
         uint256[2] calldata vrfPublicKey_,
         uint256 stakeAmount
     ) external {
-        if (bytes(ensName).length == 0 || ensNode == bytes32(0) || agentId_ == 0 || domainMask == 0) revert InvalidAmount();
+        bool hasEns = bytes(ensName).length != 0 || ensNode != bytes32(0);
+        bool hasAgent = agentId_ != 0;
+        if (domainMask == 0) revert InvalidAmount();
+        if (hasEns && (bytes(ensName).length == 0 || ensNode == bytes32(0))) revert InvalidAmount();
         if (vrfPublicKey_[0] == 0 || vrfPublicKey_[1] == 0 || stakeAmount == 0) revert InvalidAmount();
 
         address agentWallet;
-        if (address(erc8004Adapter) != address(0)) {
+        if (hasAgent && address(erc8004Adapter) != address(0)) {
             if (!erc8004Adapter.isAuthorized(agentId_, msg.sender)) revert IneligibleReviewer();
             agentWallet = erc8004Adapter.agentWallet(agentId_);
         }
-        if (address(ensVerifier) != address(0) && !ensVerifier.verify(ensNode, msg.sender, agentWallet)) {
+        if (hasEns && address(ensVerifier) != address(0) && !ensVerifier.verify(ensNode, msg.sender, agentWallet)) {
             revert IneligibleReviewer();
         }
 

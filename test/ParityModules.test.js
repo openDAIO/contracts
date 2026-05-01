@@ -284,6 +284,52 @@ describe("PROPOSAL parity modules", function () {
     expect(reviewer.registered).to.equal(true);
   });
 
+  it("keeps ENS and ERC-8004 optional for reviewer registration", async function () {
+    const { alice, bob, usdaio, stakeVault, reviewerRegistry, vrfPublicKey } = await deployCoreFixture();
+    const stake = ethers.parseEther("1000");
+    const node = ethers.id("alice.daio.eth");
+
+    const MockENSRegistry = await ethers.getContractFactory("MockENSRegistry");
+    const ensRegistry = await MockENSRegistry.deploy();
+    await ensRegistry.waitForDeployment();
+    const ENSVerifier = await ethers.getContractFactory("ENSVerifier");
+    const ensVerifier = await ENSVerifier.deploy(await ensRegistry.getAddress());
+    await ensVerifier.waitForDeployment();
+
+    const MockERC8004Registry = await ethers.getContractFactory("MockERC8004Registry");
+    const erc8004Registry = await MockERC8004Registry.deploy();
+    await erc8004Registry.waitForDeployment();
+    const ERC8004Adapter = await ethers.getContractFactory("ERC8004Adapter");
+    const erc8004Adapter = await ERC8004Adapter.deploy(await erc8004Registry.getAddress(), await erc8004Registry.getAddress());
+    await erc8004Adapter.waitForDeployment();
+
+    await reviewerRegistry.setIdentityModules(await ensVerifier.getAddress(), await erc8004Adapter.getAddress());
+    await usdaio.connect(bob).mint(bob.address, stake);
+    await usdaio.connect(bob).approve(await stakeVault.getAddress(), stake);
+
+    await reviewerRegistry.connect(bob).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+
+    const reviewer = await reviewerRegistry.getReviewer(bob.address);
+    expect(reviewer.registered).to.equal(true);
+    expect(reviewer.agentId_).to.equal(0n);
+
+    await usdaio.connect(alice).mint(alice.address, stake);
+    await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake);
+    await expect(
+      reviewerRegistry.connect(alice).registerReviewer("alice.daio.eth", node, 0, DOMAIN_RESEARCH, vrfPublicKey, stake)
+    ).to.be.revertedWithCustomError(reviewerRegistry, "IneligibleReviewer");
+  });
+
+  it("lets any account faucet-mint USDAIO on test deployments", async function () {
+    const { bob, usdaio } = await deployCoreFixture();
+    const amount = ethers.parseEther("12345");
+
+    await expect(usdaio.connect(bob).mint(bob.address, amount))
+      .to.emit(usdaio, "Transfer")
+      .withArgs(ethers.ZeroAddress, bob.address, amount);
+    expect(await usdaio.balanceOf(bob.address)).to.equal(amount);
+  });
+
   it("blocks external priority queue poisoning", async function () {
     const { alice, priorityQueue } = await deployCoreFixture();
     await expect(priorityQueue.connect(alice).push(1, ethers.id("poison"))).to.be.revertedWith("DAIOPriorityQueue: not core");
