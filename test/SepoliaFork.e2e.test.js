@@ -302,12 +302,14 @@ describeFork("Sepolia fork E2E", function () {
     const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId);
     const aliceReview = await review(commitReveal, requestId, alice, 8000, "ipfs://fork-alice", "alice", vrfProof);
     const bobReview = await review(commitReveal, requestId, bob, 6000, "ipfs://fork-bob", "bob", vrfProof);
+    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.score, aliceReview.reportHash, aliceReview.uri, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.score, bobReview.reportHash, bobReview.uri, bobReview.seed);
 
     const aliceAudit = await audit(commitReveal, requestId, alice, [bob], [7000], "alice", vrfProof);
     const bobAudit = await audit(commitReveal, requestId, bob, [alice], [9000], "bob", vrfProof);
+    expect(await commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);

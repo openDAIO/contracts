@@ -458,6 +458,8 @@ describe("DAIOCore", function () {
     await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
 
+    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
+
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
 
@@ -506,6 +508,8 @@ describe("DAIOCore", function () {
 
     await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
+
+    expect(await commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     const aliceBalanceBefore = await usdaio.balanceOf(alice.address);
     const bobBalanceBefore = await usdaio.balanceOf(bob.address);
@@ -687,6 +691,7 @@ describe("DAIOCore", function () {
 
     const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
     const accounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_REVIEW, alice.address);
+    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal([]);
     expect(stakeAfter).to.be.lt(stakeBefore);
     expect(accounting.slashed).to.equal(stakeBefore - stakeAfter);
     expect(accounting.slashCount).to.equal(1n);

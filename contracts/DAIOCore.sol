@@ -517,16 +517,16 @@ contract DAIOCore {
         _advance(requestId, RequestStatus.ReviewCommit);
     }
 
-    function submitReviewCommitFor(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) external {
+    function submitReviewCommitFor(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) external returns (bool accepted) {
         if (msg.sender != address(commitReveal)) revert InvalidAddress();
-        _submitReviewCommit(reviewer, requestId, vrfProof);
+        return _submitReviewCommit(reviewer, requestId, vrfProof);
     }
 
     function syncRequest(uint256 requestId) external nonReentrant returns (uint8 status) {
         return uint8(_syncRequest(requestId));
     }
 
-    function _submitReviewCommit(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) internal {
+    function _submitReviewCommit(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) internal returns (bool accepted) {
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewCommit);
         if (!_eligibleForRequest(reviewer, request_.domainMask)) revert IneligibleReviewer();
 
@@ -536,11 +536,11 @@ contract DAIOCore {
         (bool vrfOk, bytes32 randomness) = _tryVrfRandomness(requestId, REVIEW_SORTITION, request_.committeeEpoch, reviewer, address(0), vrfProof);
         if (!vrfOk) {
             _markProtocolFault(requestId, reviewer, "rv", request_.config.protocolFaultSlashBps);
-            return;
+            return false;
         }
         if (!_passesSortition(REVIEW_SORTITION, requestId, reviewer, address(0), randomness, request_.config.reviewElectionDifficulty)) {
             _markProtocolFault(requestId, reviewer, "rs", request_.config.protocolFaultSlashBps);
-            return;
+            return false;
         }
 
         ReviewSubmission storage submission = reviewSubmissions[requestId][reviewer];
@@ -557,6 +557,7 @@ contract DAIOCore {
         if (request_.reviewCommitCount >= request_.config.reviewCommitQuorum) {
             _advance(requestId, RequestStatus.ReviewReveal);
         }
+        return true;
     }
 
     function revealReviewFor(
@@ -606,12 +607,12 @@ contract DAIOCore {
         }
     }
 
-    function submitAuditCommitFor(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) external {
+    function submitAuditCommitFor(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) external returns (bool accepted) {
         if (msg.sender != address(commitReveal)) revert InvalidAddress();
-        _submitAuditCommit(auditor, requestId, targetProofs);
+        return _submitAuditCommit(auditor, requestId, targetProofs);
     }
 
-    function _submitAuditCommit(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) internal {
+    function _submitAuditCommit(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) internal returns (bool accepted) {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditCommit);
         if (!reviewSubmissions[requestId][auditor].revealed) revert IneligibleReviewer();
 
@@ -643,12 +644,12 @@ contract DAIOCore {
         );
         if (!assignmentOk) {
             _markProtocolFault(requestId, auditor, "av", request_.config.protocolFaultSlashBps);
-            return;
+            return false;
         }
         uint256 requiredTargets = _min(request_.config.auditTargetLimit, expectedProofs);
         if (canonicalTargets.length < requiredTargets) {
             _handleInsufficientAuditCandidates(requestId);
-            return;
+            return false;
         }
 
         _storeCanonicalAuditTargets(requestId, auditor, canonicalTargets);
@@ -661,6 +662,7 @@ contract DAIOCore {
         if (request_.auditCommitCount >= request_.config.auditCommitQuorum) {
             _advance(requestId, RequestStatus.AuditReveal);
         }
+        return true;
     }
 
     function revealAuditFor(
