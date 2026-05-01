@@ -10,6 +10,9 @@ const DOMAIN_RESEARCH = 1;
 const FAST = 0;
 const FINALIZED = 6n;
 const SCALE = 10000n;
+const ROUND_REVIEW = 0;
+const ROUND_AUDIT_CONSENSUS = 1;
+const ROUND_REPUTATION_FINAL = 2;
 const ELECTION_DIFFICULTY = 5000n;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
 const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
@@ -101,6 +104,10 @@ async function deployForkFixture() {
   const core = await DAIOCore.deploy(treasury.address, await commitReveal.getAddress(), await priorityQueue.getAddress(), await vrfCoordinator.getAddress());
   await core.waitForDeployment();
 
+  const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
+  const roundLedger = await DAIORoundLedger.deploy();
+  await roundLedger.waitForDeployment();
+
   await core.setModules(
     await stakeVault.getAddress(),
     await reviewerRegistry.getAddress(),
@@ -109,6 +116,8 @@ async function deployForkFixture() {
     await settlement.getAddress(),
     await reputationLedger.getAddress()
   );
+  await roundLedger.setCore(await core.getAddress());
+  await core.setRoundLedger(await roundLedger.getAddress());
   await core.setTierConfig(FAST, fastConfig());
   await stakeVault.setCoreOrSettlement(await core.getAddress());
   await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
@@ -158,7 +167,7 @@ async function deployForkFixture() {
   await usdaio.mint(requester.address, ethers.parseEther("1000"));
   await usdaio.connect(requester).approve(await paymentRouter.getAddress(), ethers.parseEther("1000"));
 
-  return { requester, reviewers: reviewerSigners, reviewerRegistry, vrfCoordinator, commitReveal, paymentRouter, core, vrfProof };
+  return { requester, reviewers: reviewerSigners, reviewerRegistry, vrfCoordinator, commitReveal, paymentRouter, core, roundLedger, vrfProof };
 }
 
 function sortitionScore(phase, requestId, participant, subject, randomness) {
@@ -283,7 +292,7 @@ describeFork("Sepolia fork E2E", function () {
     }
 
     const fixture = await deployForkFixture();
-    const { requester, commitReveal, paymentRouter, core, vrfProof } = fixture;
+    const { requester, commitReveal, paymentRouter, core, roundLedger, vrfProof } = fixture;
     await paymentRouter
       .connect(requester)
       .createRequestWithUSDAIO("ipfs://fork-proposal", ethers.id("fork-proposal"), ethers.id("fork-rubric"), DOMAIN_RESEARCH, FAST, 0);
@@ -303,8 +312,21 @@ describeFork("Sepolia fork E2E", function () {
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
 
-    const result = await core.getRequestFinalResult(requestId);
-    expect(result.status).to.equal(FINALIZED);
-    expect(result.auditCoverage).to.equal(10000n);
+    const attempt = (await core.getRequestLifecycle(requestId)).retryCount;
+    const round0 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_REVIEW);
+    const round1 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_AUDIT_CONSENSUS);
+    const round2 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_REPUTATION_FINAL);
+    const aliceRound2 = await roundLedger.getReviewerRoundScore(requestId, attempt, ROUND_REPUTATION_FINAL, alice.address);
+    const aliceAccounting = await roundLedger.getReviewerRoundAccounting(requestId, attempt, ROUND_REPUTATION_FINAL, alice.address);
+
+    expect(round0.score).to.equal(7000n);
+    expect(round0.closed).to.equal(true);
+    expect(round1.score).to.equal(8000n);
+    expect(round1.closed).to.equal(true);
+    expect(round2.coverage).to.equal(10000n);
+    expect(round2.score).to.equal(8000n);
+    expect(round2.closed).to.equal(true);
+    expect(aliceRound2.reputationScore).to.equal(10000n);
+    expect(aliceAccounting.reward).to.be.gt(0n);
   });
 });

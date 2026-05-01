@@ -7,10 +7,14 @@ module.exports = {
       {
         version: "0.8.24",
         settings: {
+          evmVersion: "shanghai",
+          metadata: {
+            bytecodeHash: "none"
+          },
           viaIR: true,
           optimizer: {
             enabled: true,
-            runs: 1
+            runs: 0
           }
         }
       },

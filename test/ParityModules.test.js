@@ -5,6 +5,7 @@ const vrfData = require("../lib/vrf-solidity/test/data.json");
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
 const QUEUED = 1n;
+const REVIEW_COMMIT = 2n;
 
 function tierConfig() {
   return {
@@ -101,6 +102,10 @@ describe("PROPOSAL parity modules", function () {
     );
     await core.waitForDeployment();
 
+    const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
+    const roundLedger = await DAIORoundLedger.deploy();
+    await roundLedger.waitForDeployment();
+
     await core.setModules(
       await stakeVault.getAddress(),
       await reviewerRegistry.getAddress(),
@@ -109,6 +114,8 @@ describe("PROPOSAL parity modules", function () {
       await settlement.getAddress(),
       await reputationLedger.getAddress()
     );
+    await roundLedger.setCore(await core.getAddress());
+    await core.setRoundLedger(await roundLedger.getAddress());
     await core.setTierConfig(FAST, tierConfig());
     await stakeVault.setCoreOrSettlement(await core.getAddress());
     await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
@@ -137,6 +144,7 @@ describe("PROPOSAL parity modules", function () {
       reputationLedger,
       commitReveal,
       priorityQueue,
+      roundLedger,
       vrfPublicKey,
       vrfProof,
       core
@@ -290,7 +298,7 @@ describe("PROPOSAL parity modules", function () {
   });
 
   it("creates direct USDAIO requests through PaymentRouter and funds StakeVault escrow", async function () {
-    const { requester, usdaio, stakeVault, core } = await deployCoreFixture();
+    const { requester, owner, usdaio, stakeVault, core } = await deployCoreFixture();
     const { paymentRouter } = await deployPaymentFixture(usdaio, core);
 
     const required = await core.baseRequestFee();
@@ -306,6 +314,20 @@ describe("PROPOSAL parity modules", function () {
     expect(request.status).to.equal(QUEUED);
     expect(await stakeVault.requestRewardPool(1)).to.equal((required * 9000n) / 10000n);
     expect(await stakeVault.requestProtocolFee(1)).to.equal((required * 1000n) / 10000n);
+
+    expect(await paymentRouter.latestRequestByRequester(requester.address)).to.equal(1n);
+    expect(await paymentRouter.latestRequestByRequester(owner.address)).to.equal(0n);
+    let latest = await paymentRouter.latestRequestState(requester.address);
+    expect(latest.requestId).to.equal(1n);
+    expect(latest.status).to.equal(QUEUED);
+    expect(latest.processing).to.equal(true);
+    expect(latest.completed).to.equal(false);
+
+    await core.startNextRequest();
+    latest = await paymentRouter.latestRequestState(requester.address);
+    expect(latest.status).to.equal(REVIEW_COMMIT);
+    expect(latest.processing).to.equal(true);
+    expect(latest.completed).to.equal(false);
   });
 
   it("swaps accepted ERC20 exact-output payments, consumes hook validation, and refunds leftover input", async function () {

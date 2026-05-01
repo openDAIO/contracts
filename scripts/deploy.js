@@ -226,6 +226,10 @@ async function main() {
   );
   await core.waitForDeployment();
 
+  const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
+  const roundLedger = await DAIORoundLedger.deploy();
+  await roundLedger.waitForDeployment();
+
   await core.setModules(
     await stakeVault.getAddress(),
     await reviewerRegistry.getAddress(),
@@ -234,6 +238,8 @@ async function main() {
     await settlement.getAddress(),
     await reputationLedger.getAddress()
   );
+  await roundLedger.setCore(await core.getAddress());
+  await core.setRoundLedger(await roundLedger.getAddress());
   await configureTiers(core);
   await stakeVault.setCoreOrSettlement(await core.getAddress());
   await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
@@ -321,6 +327,7 @@ async function main() {
   console.log("FRAINVRFVerifier:", await vrfVerifier.getAddress());
   console.log("DAIOVRFCoordinator:", await vrfCoordinator.getAddress());
   console.log("DAIOCore:", await core.getAddress());
+  console.log("DAIORoundLedger:", await roundLedger.getAddress());
   console.log("AcceptedTokenRegistry:", await acceptedTokenRegistry.getAddress());
   if (ensVerifier) console.log("ENSVerifier:", await ensVerifier.getAddress());
   if (erc8004Adapter) console.log("ERC8004Adapter:", await erc8004Adapter.getAddress());

@@ -36,8 +36,6 @@ interface IStakeVaultLike {
     function refundRequest(uint256 requestId, address requester) external returns (uint256 refund);
     function payReward(uint256 requestId, address reviewer, uint256 amount) external;
     function closeRequestToTreasury(uint256 requestId) external returns (uint256 accrued);
-    function withdrawTreasury(address to, uint256 amount) external;
-    function treasuryBalance() external view returns (uint256);
 }
 
 interface IConsensusScoringLike {
@@ -76,6 +74,38 @@ interface IConsensusScoringLike {
     }
 
     function compute(Input calldata input) external pure returns (Output memory output);
+}
+
+interface IDAIORoundLedgerLike {
+    function recordReviewScore(uint256 requestId, uint256 attempt, address reviewer, uint256 score) external;
+    function closeReviewSnapshot(uint256 requestId, uint256 attempt, uint256 revealQuorum, bool lowConfidence, bool aborted) external;
+    function recordConsensusScore(uint256 requestId, uint256 attempt, address reviewer, uint256 score, uint256 weight, uint256 auditScore)
+        external;
+    function closeConsensusSnapshot(
+        uint256 requestId,
+        uint256 attempt,
+        uint256 finalScore,
+        uint256 totalWeight,
+        uint256 confidence,
+        uint256 coverage,
+        bool lowConfidence,
+        bool aborted
+    ) external;
+    function closeReputationFinal(
+        uint256 requestId,
+        uint256 attempt,
+        address reputationLedger,
+        uint256 confidence,
+        uint256 coverage,
+        bool lowConfidence,
+        bool aborted
+    ) external returns (uint256 finalScore, uint256 totalWeight, bool finalLowConfidence);
+    function reviewerRoundWeight(uint256 requestId, uint256 attempt, uint8 round, address reviewer) external view returns (uint256);
+
+    function recordSlash(uint256 requestId, uint256 attempt, uint8 round, address reviewer, uint256 amount, bytes32 reasonHash, bool protocolFault)
+        external;
+    function markSemanticFault(uint256 requestId, uint256 attempt, uint8 round, address reviewer, bytes32 reasonHash) external;
+    function recordReward(uint256 requestId, uint256 attempt, uint8 round, address reviewer, uint256 amount) external;
 }
 
 interface IAssignmentManagerLike {
@@ -162,26 +192,30 @@ interface IReviewerRegistryLike {
 contract DAIOCore {
     uint256 internal constant SCALE = 10_000;
     uint256 internal constant BPS = 10_000;
+    uint8 internal constant ROUND_REVIEW = 0;
+    uint8 internal constant ROUND_AUDIT_CONSENSUS = 1;
+    uint8 internal constant ROUND_REPUTATION_FINAL = 2;
 
     bytes32 internal constant REVIEW_SORTITION = keccak256("DAIO_REVIEW_SORTITION");
     bytes32 internal constant AUDIT_SORTITION = keccak256("DAIO_AUDIT_SORTITION");
 
-    ICommitReveal public immutable commitReveal;
-    IPriorityQueue public immutable priorityQueue;
-    IDAIOVRFCoordinator public immutable vrfCoordinator;
-    address public owner;
-    address public treasury;
-    address public paymentRouter;
+    ICommitReveal internal immutable commitReveal;
+    IPriorityQueue internal immutable priorityQueue;
+    IDAIOVRFCoordinator internal immutable vrfCoordinator;
+    address internal owner;
+    address internal treasury;
+    address internal paymentRouter;
     IStakeVaultLike public stakeVault;
-    IReviewerRegistryLike public reviewerRegistry;
-    IAssignmentManagerLike public assignmentManager;
-    IConsensusScoringLike public consensusScoring;
-    ISettlementLike public settlement;
-    IReputationLedgerLike public reputationLedger;
+    IReviewerRegistryLike internal reviewerRegistry;
+    IAssignmentManagerLike internal assignmentManager;
+    IConsensusScoringLike internal consensusScoring;
+    ISettlementLike internal settlement;
+    IReputationLedgerLike internal reputationLedger;
+    IDAIORoundLedgerLike internal roundLedger;
 
     uint256 public baseRequestFee = 100 ether;
-    uint256 public protocolFeeBps = 1_000;
-    uint256 public requestCount;
+    uint256 internal constant protocolFeeBps = 1_000;
+    uint256 internal requestCount;
 
     uint256 private _locked = 1;
 
@@ -294,15 +328,21 @@ contract DAIOCore {
         bool protocolFault;
     }
 
+    struct ScoringData {
+        address[] reviewers;
+        uint256[] proposalScores;
+        IConsensusScoringLike.Output output;
+    }
+
     mapping(uint256 requestId => Request data) internal requests;
     mapping(uint256 tier => RequestConfig config) internal tierConfigs;
     mapping(uint256 requestId => mapping(address reviewer => ReviewSubmission submission)) internal reviewSubmissions;
     mapping(uint256 requestId => mapping(address auditor => AuditSubmission submission)) internal auditSubmissions;
     mapping(uint256 requestId => mapping(address auditor => mapping(address target => uint16 score))) internal auditScores;
     mapping(uint256 requestId => mapping(address auditor => mapping(address target => bool exists))) internal hasAuditScore;
-    mapping(uint256 requestId => mapping(address auditor => mapping(address target => bool canonical))) public canonicalAuditTargets;
+    mapping(uint256 requestId => mapping(address auditor => mapping(address target => bool canonical))) internal canonicalAuditTargets;
     mapping(uint256 requestId => mapping(address reviewer => ReviewerResult result)) internal reviewerResults;
-    mapping(uint256 requestId => uint256 faults) public requestFaultCount;
+    mapping(uint256 requestId => uint256 faults) internal requestFaultCount;
 
     mapping(uint256 requestId => address[] reviewers) private _reviewCommitters;
     mapping(uint256 requestId => address[] reviewers) private _revealedReviewers;
@@ -310,24 +350,8 @@ contract DAIOCore {
     mapping(uint256 requestId => mapping(address auditor => address[] targets)) private _auditTargetsByAuditor;
     mapping(uint256 requestId => mapping(address auditor => address[] targets)) private _canonicalTargetsByAuditor;
 
-    event AuditCommitted(uint256 indexed requestId, address indexed auditor, bytes32 commitHash);
-    event AuditRevealed(uint256 indexed requestId, address indexed auditor, uint256 targetCount);
-    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    event RequestCreated(uint256 indexed requestId, address indexed requester, ServiceTier tier, uint256 feePaid, uint256 priorityFee);
     event RequestFinalized(uint256 indexed requestId, uint256 finalProposalScore, uint256 confidence, bool lowConfidence);
-    event RequestRequeued(uint256 indexed requestId, uint256 retryCount, uint256 priority);
-    event RequestStarted(uint256 indexed requestId);
-    event ModulesUpdated(
-        address indexed stakeVault,
-        address indexed reviewerRegistry,
-        address assignmentManager,
-        address consensusScoring,
-        address settlement,
-        address reputationLedger
-    );
-    event ReviewCommitted(uint256 indexed requestId, address indexed reviewer, bytes32 commitHash);
     event ReviewRevealed(uint256 indexed requestId, address indexed reviewer, uint16 proposalScore, bytes32 reportHash, string reportURI);
-    event ProtocolFault(uint256 indexed requestId, address indexed reviewer, string reason);
     event StatusChanged(uint256 indexed requestId, RequestStatus status);
 
     error AlreadySubmitted();
@@ -338,10 +362,7 @@ contract DAIOCore {
     error InvalidAddress();
     error InvalidAmount();
     error InvalidAuditTarget();
-    error InvalidScore();
     error NotOwner();
-    error NotSelected();
-    error PhaseTimedOut();
     error QueueEmpty();
     error ReentrantCall();
     error TooEarly();
@@ -377,18 +398,21 @@ contract DAIOCore {
         owner = msg.sender;
         treasury = treasury_;
 
-        emit OwnershipTransferred(address(0), msg.sender);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert InvalidAddress();
-        emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
     }
 
     function setPaymentRouter(address newPaymentRouter) external onlyOwner {
         if (newPaymentRouter == address(0)) revert InvalidAddress();
         paymentRouter = newPaymentRouter;
+    }
+
+    function setRoundLedger(address newRoundLedger) external onlyOwner {
+        if (newRoundLedger == address(0)) revert InvalidAddress();
+        roundLedger = IDAIORoundLedgerLike(newRoundLedger);
     }
 
     function setModules(
@@ -411,19 +435,10 @@ contract DAIOCore {
         consensusScoring = IConsensusScoringLike(consensusScoring_);
         settlement = ISettlementLike(settlement_);
         reputationLedger = IReputationLedgerLike(reputationLedger_);
-        emit ModulesUpdated(stakeVault_, reviewerRegistry_, assignmentManager_, consensusScoring_, settlement_, reputationLedger_);
-    }
-
-    function setEconomics(uint256 newBaseRequestFee, uint256 newMinStake, uint256 newProtocolFeeBps) external onlyOwner {
-        newMinStake;
-        if (newProtocolFeeBps > BPS) revert InvalidAmount();
-
-        baseRequestFee = newBaseRequestFee;
-        protocolFeeBps = newProtocolFeeBps;
     }
 
     function setTierConfig(ServiceTier tier, RequestConfig calldata config) external onlyOwner {
-        _validateConfig(config);
+        if (config.reviewEpochSize == 0 || config.auditEpochSize == 0) revert BadConfig();
         tierConfigs[uint256(tier)] = config;
     }
 
@@ -454,7 +469,7 @@ contract DAIOCore {
         }
 
         RequestConfig memory config = tierConfigs[uint256(tier)];
-        _validateConfig(config);
+        if (config.reviewEpochSize == 0 || config.auditEpochSize == 0) revert BadConfig();
 
         uint256 feePaid = baseRequestFee + priorityFee;
         uint256 protocolFee = (feePaid * protocolFeeBps) / BPS;
@@ -485,7 +500,6 @@ contract DAIOCore {
         stakeVault.fundRequest(requestId, msg.sender, rewardPool, protocolFee);
         priorityQueue.pushRequest(priorityFee, requestId);
 
-        emit RequestCreated(requestId, requester, tier, feePaid, priorityFee);
         emit StatusChanged(requestId, RequestStatus.Queued);
     }
 
@@ -501,7 +515,6 @@ contract DAIOCore {
         if (requestId == 0) revert QueueEmpty();
 
         _advance(requestId, RequestStatus.ReviewCommit);
-        emit RequestStarted(requestId);
     }
 
     function submitReviewCommitFor(address reviewer, uint256 requestId, uint256[4] calldata vrfProof) external {
@@ -540,8 +553,6 @@ contract DAIOCore {
 
         _reviewCommitters[requestId].push(reviewer);
         request_.reviewCommitCount++;
-
-        emit ReviewCommitted(requestId, reviewer, commitHash);
 
         if (request_.reviewCommitCount >= request_.config.reviewCommitQuorum) {
             _advance(requestId, RequestStatus.ReviewReveal);
@@ -590,6 +601,7 @@ contract DAIOCore {
         emit ReviewRevealed(requestId, reviewer, proposalScore, reportHash, reportURI);
 
         if (request_.reviewRevealCount >= request_.config.reviewRevealQuorum) {
+            _snapshotRound0(requestId, false);
             _advance(requestId, RequestStatus.AuditCommit);
         }
     }
@@ -645,8 +657,6 @@ contract DAIOCore {
         submission.committed = true;
         reviewerRegistry.lockStake(auditor, requestId);
         request_.auditCommitCount++;
-
-        emit AuditCommitted(requestId, auditor, commitHash);
 
         if (request_.auditCommitCount >= request_.config.auditCommitQuorum) {
             _advance(requestId, RequestStatus.AuditReveal);
@@ -712,8 +722,6 @@ contract DAIOCore {
         submission.revealed = true;
         request_.auditRevealCount++;
 
-        emit AuditRevealed(requestId, auditor, targets.length);
-
         if (request_.auditRevealCount >= request_.config.auditRevealQuorum) {
             _finalize(requestId);
         }
@@ -755,6 +763,7 @@ contract DAIOCore {
                 else _cancelAndRefund(requestId);
             } else {
                 request_.lowConfidence = true;
+                _snapshotRound0(requestId, false);
                 _advance(requestId, RequestStatus.AuditCommit);
             }
             return true;
@@ -784,23 +793,6 @@ contract DAIOCore {
         }
 
         return false;
-    }
-
-    function finalizeRequest(uint256 requestId) external nonReentrant {
-        Request storage request_ = _requireStatus(requestId, RequestStatus.AuditReveal);
-        if (request_.auditRevealCount < request_.config.auditRevealQuorum && !_isTimedOut(request_)) revert TooEarly();
-        if (request_.auditRevealCount < request_.config.auditRevealQuorum) request_.lowConfidence = true;
-
-        _finalize(requestId);
-    }
-
-    function withdrawTreasury(uint256 amount) external onlyOwner nonReentrant {
-        if (amount == 0 || amount > treasuryBalance()) revert InvalidAmount();
-        stakeVault.withdrawTreasury(treasury, amount);
-    }
-
-    function treasuryBalance() public view returns (uint256) {
-        return address(stakeVault) == address(0) ? 0 : stakeVault.treasuryBalance();
     }
 
     function _hashReviewReveal(
@@ -859,114 +851,135 @@ contract DAIOCore {
         );
     }
 
-    function getReviewerResult(uint256 requestId, address reviewer)
-        external
-        view
-        returns (
-            uint256 reportQualityMedian,
-            uint256 normalizedReportQuality,
-            uint256 auditReliabilityRaw,
-            uint256 normalizedAuditReliability,
-            uint256 finalContribution,
-            uint256 scoreAgreement,
-            uint256 reward,
-            bool minorityOpinion,
-            bool covered,
-            bool protocolFault
-        )
-    {
-        ReviewerResult storage result = reviewerResults[requestId][reviewer];
-        return (
-            result.reportQualityMedian,
-            result.normalizedReportQuality,
-            result.auditReliabilityRaw,
-            result.normalizedAuditReliability,
-            result.finalContribution,
-            result.scoreAgreement,
-            result.reward,
-            result.minorityOpinion,
-            result.covered,
-            result.protocolFault
-        );
-    }
-
-    function getRequestFinalResult(uint256 requestId)
-        external
-        view
-        returns (
-            RequestStatus status,
-            uint256 finalProposalScore,
-            uint256 confidence,
-            uint256 auditCoverage,
-            uint256 scoreDispersion,
-            uint256 finalReliability,
-            bool lowConfidence,
-            uint256 faultSignal
-        )
-    {
-        Request storage request_ = _requireRequest(requestId);
-        return (
-            request_.status,
-            request_.finalProposalScore,
-            request_.confidence,
-            request_.auditCoverage,
-            request_.scoreDispersion,
-            request_.finalReliability,
-            request_.lowConfidence,
-            requestFaultCount[requestId]
-        );
-    }
-
-    function getReviewerRequestSignals(uint256 requestId, address reviewer)
-        external
-        view
-        returns (
-            uint256 reportQuality,
-            uint256 auditReliability,
-            uint256 finalContribution,
-            uint256 scoreAgreement,
-            uint256 reward,
-            bool minorityOpinion,
-            bool covered,
-            bool protocolFault
-        )
-    {
-        ReviewerResult storage result = reviewerResults[requestId][reviewer];
-        return (
-            result.normalizedReportQuality,
-            result.normalizedAuditReliability,
-            result.finalContribution,
-            result.scoreAgreement,
-            result.reward,
-            result.minorityOpinion,
-            result.covered,
-            result.protocolFault
-        );
-    }
-
     function _finalize(uint256 requestId) internal {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditReveal);
-        address[] storage reviewers_ = _revealedReviewers[requestId];
-        uint256 reviewerCount = reviewers_.length;
-        if (reviewerCount == 0) revert IneligibleReviewer();
         if (address(consensusScoring) == address(0) || address(settlement) == address(0) || address(reputationLedger) == address(0)) {
             revert InvalidAddress();
         }
+        ScoringData memory data = _computeScoringData(requestId);
+        uint256 reviewerCount = data.reviewers.length;
+        if (reviewerCount == 0) revert IneligibleReviewer();
 
-        address[] memory reviewerList = new address[](reviewerCount);
-        uint256[] memory proposalScores = new uint256[](reviewerCount);
+        if (request_.tier == ServiceTier.Critical && data.output.coverage < request_.config.auditCoverageQuorum) {
+            request_.confidence = data.output.confidence;
+            request_.auditCoverage = data.output.coverage;
+            request_.scoreDispersion = data.output.scoreDispersion;
+            request_.lowConfidence = true;
+            _snapshotRound0(requestId, true);
+            _recordFinalSnapshots(requestId, data, true);
+            if (_canRetry(request_)) {
+                _requeue(requestId);
+            } else {
+                _unlockRequestStakes(requestId);
+                _fail(requestId, RequestStatus.Unresolved);
+            }
+            return;
+        }
+
+        _snapshotRound0(requestId, false);
+        (uint256 finalScore, uint256 finalTotalWeight, bool finalLowConfidence) = _recordFinalSnapshots(requestId, data, false);
+
+        request_.finalProposalScore = finalScore;
+        request_.confidence = data.output.confidence;
+        request_.auditCoverage = data.output.coverage;
+        request_.scoreDispersion = data.output.scoreDispersion;
+        request_.finalReliability = data.output.confidence;
+        request_.lowConfidence = data.output.lowConfidence || finalLowConfidence;
+        request_.status = RequestStatus.Finalized;
+
+        uint256 rewardPool = request_.rewardPool;
+        IDAIORoundLedgerLike ledger = roundLedger;
+        for (uint256 i = 0; i < reviewerCount; i++) {
+            address reviewer = data.reviewers[i];
+            bool protocolFault = reviewSubmissions[requestId][reviewer].protocolFault || auditSubmissions[requestId][reviewer].protocolFault;
+            uint256 finalWeight = ledger.reviewerRoundWeight(requestId, request_.retryCount, ROUND_REPUTATION_FINAL, reviewer);
+            ISettlementLike.ReviewerOutput memory settlementOutput = settlement.reviewerSettlement(
+                ISettlementLike.ReviewerInput({
+                    rewardPool: rewardPool,
+                    totalContribution: finalTotalWeight,
+                    weight: finalWeight,
+                    proposalScore: data.proposalScores[i],
+                    finalScore: finalScore,
+                    contribution: data.output.contributions[i],
+                    contributionThreshold: request_.config.contributionThreshold,
+                    covered: data.output.covered[i],
+                    protocolFault: protocolFault
+                })
+            );
+
+            reviewerResults[requestId][reviewer] = ReviewerResult({
+                reportQualityMedian: data.output.medians[i],
+                normalizedReportQuality: data.output.normalizedQuality[i],
+                auditReliabilityRaw: data.output.rawReliability[i],
+                normalizedAuditReliability: data.output.normalizedReliability[i],
+                finalContribution: data.output.contributions[i],
+                scoreAgreement: settlementOutput.scoreAgreement,
+                reward: settlementOutput.reward,
+                minorityOpinion: data.output.minority[i],
+                covered: data.output.covered[i],
+                protocolFault: protocolFault
+            });
+
+            if (settlementOutput.semanticFault) {
+                _markSemanticFaultAccounting(requestId, reviewer, "ss");
+                bool suspended =
+                    reviewerRegistry.recordSemanticFault(reviewer, request_.config.semanticStrikeThreshold, request_.config.cooldownBlocks);
+                if (suspended) {
+                    _slashStakeBps(requestId, reviewer, request_.config.semanticSlashBps, "ss", false);
+                }
+            }
+
+            reviewerRegistry.markCompleted(reviewer);
+
+            reputationLedger.record(
+                reviewer,
+                reviewerRegistry.agentId(reviewer),
+                data.output.normalizedQuality[i],
+                data.output.normalizedReliability[i],
+                data.output.contributions[i],
+                data.output.confidence,
+                protocolFault,
+                settlementOutput.scoreAgreement,
+                data.output.minority[i],
+                reviewSubmissions[requestId][reviewer].reportURI,
+                reviewSubmissions[requestId][reviewer].reportHash
+            );
+
+            if (settlementOutput.reward > 0) {
+                stakeVault.payReward(requestId, reviewer, settlementOutput.reward);
+                _recordRewardAccounting(requestId, reviewer, settlementOutput.reward);
+            }
+        }
+
+        _unlockRequestStakes(requestId);
+        stakeVault.closeRequestToTreasury(requestId);
+        request_.rewardPool = 0;
+        request_.protocolFee = 0;
+
+        emit RequestFinalized(requestId, finalScore, data.output.confidence, request_.lowConfidence);
+        emit StatusChanged(requestId, RequestStatus.Finalized);
+    }
+
+    function _computeScoringData(uint256 requestId) internal view returns (ScoringData memory data) {
+        Request storage request_ = _requireRequest(requestId);
+        address[] storage reviewers_ = _revealedReviewers[requestId];
+        uint256 reviewerCount = reviewers_.length;
+        if (reviewerCount == 0) revert IneligibleReviewer();
+
+        data.reviewers = new address[](reviewerCount);
+        data.proposalScores = new uint256[](reviewerCount);
         uint256[][] memory incomingScoresByTarget = new uint256[][](reviewerCount);
         uint256[][] memory auditorTargetIndexes = new uint256[][](reviewerCount);
         uint256[][] memory auditorScores = new uint256[][](reviewerCount);
 
         for (uint256 i = 0; i < reviewerCount; i++) {
             address reviewer = reviewers_[i];
-            reviewerList[i] = reviewer;
-            proposalScores[i] = reviewSubmissions[requestId][reviewer].proposalScore;
+            data.reviewers[i] = reviewer;
+            data.proposalScores[i] = reviewSubmissions[requestId][reviewer].proposalScore;
         }
 
         for (uint256 i = 0; i < reviewerCount; i++) {
-            address reviewer = reviewerList[i];
+            address reviewer = data.reviewers[i];
             address[] storage incomingAuditors = _incomingAuditors[requestId][reviewer];
             incomingScoresByTarget[i] = new uint256[](incomingAuditors.length);
             for (uint256 j = 0; j < incomingAuditors.length; j++) {
@@ -977,12 +990,12 @@ contract DAIOCore {
             auditorTargetIndexes[i] = new uint256[](targets.length);
             auditorScores[i] = new uint256[](targets.length);
             for (uint256 j = 0; j < targets.length; j++) {
-                auditorTargetIndexes[i][j] = _reviewerIndex(reviewerList, targets[j]);
+                auditorTargetIndexes[i][j] = _reviewerIndex(data.reviewers, targets[j]);
                 auditorScores[i][j] = auditScores[requestId][reviewer][targets[j]];
             }
         }
 
-        IConsensusScoringLike.Output memory output = consensusScoring.compute(
+        data.output = consensusScoring.compute(
             IConsensusScoringLike.Input({
                 reviewRevealCount: request_.reviewRevealCount,
                 auditRevealCount: request_.auditRevealCount,
@@ -993,106 +1006,70 @@ contract DAIOCore {
                 contributionThreshold: request_.config.contributionThreshold,
                 minorityThreshold: request_.config.minorityThreshold,
                 lowConfidence: request_.lowConfidence,
-                proposalScores: proposalScores,
+                proposalScores: data.proposalScores,
                 incomingScoresByTarget: incomingScoresByTarget,
                 auditorTargetIndexes: auditorTargetIndexes,
                 auditorScores: auditorScores
             })
         );
+    }
 
-        if (request_.tier == ServiceTier.Critical && output.coverage < request_.config.auditCoverageQuorum) {
-            request_.confidence = output.confidence;
-            request_.auditCoverage = output.coverage;
-            request_.scoreDispersion = output.scoreDispersion;
-            request_.lowConfidence = true;
-            if (_canRetry(request_)) {
-                _requeue(requestId);
-            } else {
-                _unlockRequestStakes(requestId);
-                _fail(requestId, RequestStatus.Unresolved);
-            }
-            return;
-        }
+    function _snapshotRound0(uint256 requestId, bool aborted) internal {
+        Request storage request_ = _requireRequest(requestId);
+        uint256 attempt = request_.retryCount;
 
-        request_.finalProposalScore = output.finalScore;
-        request_.confidence = output.confidence;
-        request_.auditCoverage = output.coverage;
-        request_.scoreDispersion = output.scoreDispersion;
-        request_.finalReliability = output.confidence;
-        request_.lowConfidence = output.lowConfidence;
-        request_.status = RequestStatus.Finalized;
+        address[] storage reviewers_ = _revealedReviewers[requestId];
+        uint256 reviewerCount = reviewers_.length;
+        if (reviewerCount == 0) return;
 
-        uint256 rewardPool = request_.rewardPool;
+        IDAIORoundLedgerLike ledger = _roundLedger();
         for (uint256 i = 0; i < reviewerCount; i++) {
-            address reviewer = reviewerList[i];
-            bool protocolFault = reviewSubmissions[requestId][reviewer].protocolFault || auditSubmissions[requestId][reviewer].protocolFault;
-            ISettlementLike.ReviewerOutput memory settlementOutput = settlement.reviewerSettlement(
-                ISettlementLike.ReviewerInput({
-                    rewardPool: rewardPool,
-                    totalContribution: output.totalContribution,
-                    weight: output.weights[i],
-                    proposalScore: proposalScores[i],
-                    finalScore: output.finalScore,
-                    contribution: output.contributions[i],
-                    contributionThreshold: request_.config.contributionThreshold,
-                    covered: output.covered[i],
-                    protocolFault: protocolFault
-                })
-            );
-
-            reviewerResults[requestId][reviewer] = ReviewerResult({
-                reportQualityMedian: output.medians[i],
-                normalizedReportQuality: output.normalizedQuality[i],
-                auditReliabilityRaw: output.rawReliability[i],
-                normalizedAuditReliability: output.normalizedReliability[i],
-                finalContribution: output.contributions[i],
-                scoreAgreement: settlementOutput.scoreAgreement,
-                reward: settlementOutput.reward,
-                minorityOpinion: output.minority[i],
-                covered: output.covered[i],
-                protocolFault: protocolFault
-            });
-
-            if (settlementOutput.semanticFault) {
-                bool suspended =
-                    reviewerRegistry.recordSemanticFault(reviewer, request_.config.semanticStrikeThreshold, request_.config.cooldownBlocks);
-                if (suspended) {
-                    _slashStakeBps(reviewer, request_.config.semanticSlashBps, "ss", false);
-                }
-            }
-
-            reviewerRegistry.markCompleted(reviewer);
-
-            reputationLedger.record(
-                reviewer,
-                reviewerRegistry.agentId(reviewer),
-                output.normalizedQuality[i],
-                output.normalizedReliability[i],
-                output.contributions[i],
-                output.confidence,
-                protocolFault,
-                settlementOutput.scoreAgreement,
-                output.minority[i],
-                reviewSubmissions[requestId][reviewer].reportURI,
-                reviewSubmissions[requestId][reviewer].reportHash
-            );
-
-            if (settlementOutput.reward > 0) {
-                stakeVault.payReward(requestId, reviewer, settlementOutput.reward);
-            }
+            address reviewer = reviewers_[i];
+            ledger.recordReviewScore(requestId, attempt, reviewer, reviewSubmissions[requestId][reviewer].proposalScore);
         }
+        ledger.closeReviewSnapshot(requestId, attempt, request_.config.reviewRevealQuorum, request_.lowConfidence, aborted);
+    }
 
-        _unlockRequestStakes(requestId);
-        stakeVault.closeRequestToTreasury(requestId);
-        request_.rewardPool = 0;
-        request_.protocolFee = 0;
+    function _recordFinalSnapshots(uint256 requestId, ScoringData memory data, bool aborted)
+        internal
+        returns (uint256 finalScore, uint256 totalWeight, bool lowConfidence)
+    {
+        Request storage request_ = _requireRequest(requestId);
+        IDAIORoundLedgerLike ledger = _roundLedger();
+        uint256 attempt = request_.retryCount;
+        for (uint256 i = 0; i < data.reviewers.length; i++) {
+            ledger.recordConsensusScore(requestId, attempt, data.reviewers[i], data.proposalScores[i], data.output.weights[i], data.output.medians[i]);
+        }
+        ledger.closeConsensusSnapshot(
+            requestId,
+            attempt,
+            data.output.finalScore,
+            data.output.totalContribution,
+            data.output.confidence,
+            data.output.coverage,
+            data.output.lowConfidence,
+            aborted
+        );
+        return ledger.closeReputationFinal(
+            requestId, attempt, address(reputationLedger), data.output.confidence, data.output.coverage, data.output.lowConfidence, aborted
+        );
+    }
 
-        emit RequestFinalized(requestId, output.finalScore, output.confidence, request_.lowConfidence);
-        emit StatusChanged(requestId, RequestStatus.Finalized);
+    function _snapshotAttemptProgress(uint256 requestId, bool aborted) internal {
+        Request storage request_ = _requireRequest(requestId);
+        if (request_.reviewRevealCount > 0) _snapshotRound0(requestId, aborted);
+        if (
+            request_.auditRevealCount > 0 && address(consensusScoring) != address(0) && address(reputationLedger) != address(0)
+                && _revealedReviewers[requestId].length > 0
+        ) {
+            ScoringData memory data = _computeScoringData(requestId);
+            _recordFinalSnapshots(requestId, data, aborted);
+        }
     }
 
     function _cancelAndRefund(uint256 requestId) internal {
         Request storage request_ = _requireRequest(requestId);
+        _snapshotAttemptProgress(requestId, true);
         _unlockRequestStakes(requestId);
         request_.rewardPool = 0;
         request_.protocolFee = 0;
@@ -1106,6 +1083,7 @@ contract DAIOCore {
         if (status != RequestStatus.Failed && status != RequestStatus.Unresolved) revert BadConfig();
 
         Request storage request_ = _requireRequest(requestId);
+        _snapshotAttemptProgress(requestId, true);
         _unlockRequestStakes(requestId);
         request_.rewardPool = 0;
         request_.protocolFee = 0;
@@ -1140,11 +1118,11 @@ contract DAIOCore {
 
         priorityQueue.pushRequest(request_.activePriority, requestId);
 
-        emit RequestRequeued(requestId, request_.retryCount, request_.activePriority);
         emit StatusChanged(requestId, RequestStatus.Queued);
     }
 
     function _clearRequestProgress(uint256 requestId) internal {
+        _snapshotAttemptProgress(requestId, true);
         _unlockRequestStakes(requestId);
 
         address[] storage committers = _reviewCommitters[requestId];
@@ -1242,14 +1220,41 @@ contract DAIOCore {
         auditSubmissions[requestId][reviewerAddress].protocolFault = true;
 
         if (!alreadyFaulted) {
-            _slashStakeBps(reviewerAddress, slashBps, reason, true);
+            _slashStakeBps(requestId, reviewerAddress, slashBps, reason, true);
             requestFaultCount[requestId]++;
-            emit ProtocolFault(requestId, reviewerAddress, reason);
         }
     }
 
-    function _slashStakeBps(address reviewerAddress, uint256 slashBps, string memory reason, bool protocolFault) internal {
-        reviewerRegistry.slashStakeBps(reviewerAddress, slashBps, reason, protocolFault);
+    function _slashStakeBps(uint256 requestId, address reviewerAddress, uint256 slashBps, string memory reason, bool protocolFault)
+        internal
+        returns (uint256 amount)
+    {
+        amount = reviewerRegistry.slashStakeBps(reviewerAddress, slashBps, reason, protocolFault);
+        _recordSlashAccounting(requestId, reviewerAddress, amount, reason, protocolFault);
+    }
+
+    function _recordSlashAccounting(uint256 requestId, address reviewer, uint256 amount, string memory reason, bool protocolFault) internal {
+        Request storage request_ = _requireRequest(requestId);
+        uint8 round = _accountingRoundFor(request_.status, protocolFault);
+        _roundLedger().recordSlash(requestId, request_.retryCount, round, reviewer, amount, keccak256(bytes(reason)), protocolFault);
+    }
+
+    function _markSemanticFaultAccounting(uint256 requestId, address reviewer, string memory reason) internal {
+        Request storage request_ = _requireRequest(requestId);
+        _roundLedger().markSemanticFault(requestId, request_.retryCount, ROUND_REPUTATION_FINAL, reviewer, keccak256(bytes(reason)));
+    }
+
+    function _recordRewardAccounting(uint256 requestId, address reviewer, uint256 amount) internal {
+        if (amount == 0) return;
+        Request storage request_ = _requireRequest(requestId);
+        _roundLedger().recordReward(requestId, request_.retryCount, ROUND_REPUTATION_FINAL, reviewer, amount);
+    }
+
+    function _accountingRoundFor(RequestStatus status, bool protocolFault) internal pure returns (uint8) {
+        if (!protocolFault) return ROUND_REPUTATION_FINAL;
+        if (status == RequestStatus.AuditCommit || status == RequestStatus.AuditReveal) return ROUND_AUDIT_CONSENSUS;
+        if (status == RequestStatus.Finalized || status == RequestStatus.Unresolved) return ROUND_REPUTATION_FINAL;
+        return ROUND_REVIEW;
     }
 
     function _advance(uint256 requestId, RequestStatus status) internal {
@@ -1270,6 +1275,11 @@ contract DAIOCore {
         if (request_.status != status) revert BadStatus(status, request_.status);
     }
 
+    function _roundLedger() internal view returns (IDAIORoundLedgerLike ledger) {
+        ledger = roundLedger;
+        if (address(ledger) == address(0)) revert InvalidAddress();
+    }
+
     function _eligibleForRequest(address reviewerAddress, uint256 domainMask) internal view returns (bool) {
         return address(reviewerRegistry) != address(0) && reviewerRegistry.isEligible(reviewerAddress, domainMask);
     }
@@ -1285,32 +1295,6 @@ contract DAIOCore {
         if (request_.status == RequestStatus.AuditCommit) return request_.config.auditCommitTimeout;
         if (request_.status == RequestStatus.AuditReveal) return request_.config.auditRevealTimeout;
         return 0;
-    }
-
-    function _validateConfig(RequestConfig memory config) internal pure {
-        if (
-            config.reviewElectionDifficulty > SCALE
-                || config.auditElectionDifficulty > SCALE
-                || config.reviewElectionDifficulty == 0
-                || config.auditElectionDifficulty == 0
-                || config.reviewCommitQuorum == 0
-                || config.reviewRevealQuorum == 0
-                || config.auditCommitQuorum == 0
-                || config.auditRevealQuorum == 0
-                || config.auditTargetLimit == 0
-                || config.minIncomingAudit == 0
-                || config.auditCoverageQuorum > SCALE
-                || config.contributionThreshold > SCALE
-                || config.reviewEpochSize == 0
-                || config.auditEpochSize == 0
-                || config.minorityThreshold > SCALE
-                || config.semanticStrikeThreshold == 0
-                || config.protocolFaultSlashBps > BPS
-                || config.missedRevealSlashBps > BPS
-                || config.semanticSlashBps > BPS
-        ) {
-            revert BadConfig();
-        }
     }
 
     function _tryVrfRandomness(

@@ -14,6 +14,9 @@ const REVIEW_REVEAL = 3n;
 const AUDIT_COMMIT = 4n;
 const UNRESOLVED = 9n;
 const SCALE = 10000n;
+const ROUND_REVIEW = 0;
+const ROUND_AUDIT_CONSENSUS = 1;
+const ROUND_REPUTATION_FINAL = 2;
 const ELECTION_DIFFICULTY = 5000n;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
 const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
@@ -31,6 +34,7 @@ function tierConfig({
   auditEpochSize,
   finalityFactor,
   maxRetries,
+  semanticStrikeThreshold = 3,
   protocolFaultSlashBps,
   missedRevealSlashBps,
   semanticSlashBps,
@@ -56,7 +60,7 @@ function tierConfig({
     finalityFactor,
     maxRetries,
     minorityThreshold: 1500,
-    semanticStrikeThreshold: 3,
+    semanticStrikeThreshold,
     protocolFaultSlashBps,
     missedRevealSlashBps,
     semanticSlashBps,
@@ -128,6 +132,10 @@ describe("DAIOCore", function () {
     );
     await core.waitForDeployment();
 
+    const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
+    const roundLedger = await DAIORoundLedger.deploy();
+    await roundLedger.waitForDeployment();
+
     await core.setModules(
       await stakeVault.getAddress(),
       await reviewerRegistry.getAddress(),
@@ -136,6 +144,8 @@ describe("DAIOCore", function () {
       await settlement.getAddress(),
       await reputationLedger.getAddress()
     );
+    await roundLedger.setCore(await core.getAddress());
+    await core.setRoundLedger(await roundLedger.getAddress());
     await stakeVault.setCoreOrSettlement(await core.getAddress());
     await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
     await reviewerRegistry.setCore(await core.getAddress());
@@ -283,6 +293,7 @@ describe("DAIOCore", function () {
       priorityQueue,
       vrfCoordinator,
       vrfProof,
+      roundLedger,
       core
     };
   }
@@ -453,9 +464,23 @@ describe("DAIOCore", function () {
     return { alice, bob, aliceReview, bobReview };
   }
 
+  async function finishAuditWithPair(fixture, requestId, alice, bob, aliceScoreForBob = 7000, bobScoreForAlice = 9000) {
+    const { commitReveal, vrfProof } = fixture;
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [aliceScoreForBob], `alice-audit-${requestId}-${aliceScoreForBob}`);
+    const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [bobScoreForAlice], `bob-audit-${requestId}-${bobScoreForAlice}`);
+
+    await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
+    await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
+
+    await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
+    await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
+
+    return { aliceAudit, bobAudit };
+  }
+
   it("runs the post-audit scoring and settlement path", async function () {
     const fixture = await deployFixture();
-    const { requester, usdaio, commitReveal, paymentRouter, vrfProof, core, reputationLedger } = fixture;
+    const { requester, usdaio, stakeVault, commitReveal, paymentRouter, vrfProof, core, reputationLedger, roundLedger } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
     await core.startNextRequest();
@@ -470,6 +495,12 @@ describe("DAIOCore", function () {
     await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
     await commitReveal.connect(bob).revealReview(requestId, bobReview.proposalScore, bobReview.reportHash, bobReview.reportURI, bobReview.seed);
 
+    const previewRound0 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_REVIEW);
+    const previewAliceRound0 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REVIEW, alice.address);
+    expect(previewRound0.score).to.equal(7000n);
+    expect(previewRound0.closed).to.equal(true);
+    expect(previewAliceRound0.score).to.equal(8000n);
+
     const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
     const bobAudit = await buildAuditCommit(commitReveal, requestId, bob, [alice], [9000], "bob");
 
@@ -482,32 +513,149 @@ describe("DAIOCore", function () {
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
 
-    const result = await core.getRequestFinalResult(requestId);
-    const aliceResult = await core.getReviewerResult(requestId, alice.address);
-    const bobResult = await core.getReviewerResult(requestId, bob.address);
-
-    expect(result.status).to.equal(FINALIZED);
-    expect(result.finalProposalScore).to.equal(8000n);
-    expect(result.auditCoverage).to.equal(10000n);
-    expect(result.lowConfidence).to.equal(false);
-    expect(result.confidence).to.equal(9000n);
-
-    expect(aliceResult.reportQualityMedian).to.equal(9000n);
-    expect(bobResult.reportQualityMedian).to.equal(7000n);
-
-    expect(aliceResult.normalizedReportQuality).to.equal(10000n);
-    expect(bobResult.normalizedReportQuality).to.equal(7777n);
-
-    expect(aliceResult.finalContribution).to.equal(10000n);
-    expect(bobResult.finalContribution).to.equal(7777n);
+    const lifecycle = await core.getRequestLifecycle(requestId);
+    expect(lifecycle.status).to.equal(FINALIZED);
+    expect(lifecycle.lowConfidence).to.equal(false);
+    const latestState = await paymentRouter.latestRequestState(requester.address);
+    expect(latestState.requestId).to.equal(requestId);
+    expect(latestState.status).to.equal(FINALIZED);
+    expect(latestState.processing).to.equal(false);
+    expect(latestState.completed).to.equal(true);
 
     expect(await usdaio.balanceOf(alice.address)).to.be.gt(aliceBalanceBefore);
     expect(await usdaio.balanceOf(bob.address)).to.be.gt(bobBalanceBefore);
-    expect(await core.treasuryBalance()).to.be.gte(ethers.parseEther("10"));
+    expect(await stakeVault.treasuryBalance()).to.be.gte(ethers.parseEther("10"));
+
+    expect((await core.getRequestLifecycle(requestId)).retryCount).to.equal(0n);
+    const round0 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_REVIEW);
+    expect(round0.score).to.equal(7000n);
+    expect(round0.totalWeight).to.equal(20000n);
+    expect(round0.closed).to.equal(true);
+    expect(round0.aborted).to.equal(false);
+
+    const aliceRound0 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REVIEW, alice.address);
+    expect(aliceRound0.score).to.equal(8000n);
+    expect(aliceRound0.weight).to.equal(10000n);
+    expect(aliceRound0.weightedScore).to.equal(8000n);
+    expect(aliceRound0.available).to.equal(true);
+
+    const round1 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_AUDIT_CONSENSUS);
+    expect(round1.score).to.equal(8000n);
+    expect(round1.totalWeight).to.equal(17777n);
+    expect(round1.coverage).to.equal(10000n);
+    expect(round1.closed).to.equal(true);
+
+    const aliceRound1 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_AUDIT_CONSENSUS, alice.address);
+    expect(aliceRound1.auditScore).to.equal(9000n);
+    expect(aliceRound1.weight).to.equal(10000n);
+
+    const bobRound1 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_AUDIT_CONSENSUS, bob.address);
+    expect(bobRound1.auditScore).to.equal(7000n);
+    expect(bobRound1.weight).to.equal(7777n);
+
+    const round2 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_REPUTATION_FINAL);
+    expect(round2.score).to.equal(8000n);
+    expect(round2.totalWeight).to.equal(17777n);
+    expect(round2.coverage).to.equal(10000n);
+    expect(round2.confidence).to.equal(9000n);
+    expect(round2.closed).to.equal(true);
+
+    const aliceRound2 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REPUTATION_FINAL, alice.address);
+    expect(aliceRound2.reputationScore).to.equal(10000n);
+    expect(aliceRound2.weight).to.equal(10000n);
+
+    const aliceAccounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_REPUTATION_FINAL, alice.address);
+    expect(aliceAccounting.reward).to.be.gt(0n);
+    expect(aliceAccounting.slashed).to.equal(0n);
 
     const aliceReputation = await reputationLedger.reputations(alice.address);
     expect(aliceReputation.samples).to.equal(1n);
     expect(aliceReputation.finalContribution).to.equal(10000n);
+  });
+
+  it("uses ReputationLedger as the round 2 final-score weight source", async function () {
+    const fixture = await deployFixture();
+    const { owner, requester, paymentRouter, reputationLedger, reviewerRegistry, core, roundLedger } = fixture;
+
+    const requestId = await createRequest(paymentRouter, requester, FAST, 0n, "reputation-weighted");
+    const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
+
+    await reputationLedger.setCore(owner.address);
+    await reputationLedger.record(
+      alice.address,
+      await reviewerRegistry.agentId(alice.address),
+      1000,
+      1000,
+      1000,
+      1000,
+      false,
+      10000,
+      false,
+      "ipfs://seed-low-reputation",
+      ethers.id("seed-low-reputation")
+    );
+    await reputationLedger.setCore(await core.getAddress());
+
+    await finishAuditWithPair(fixture, requestId, alice, bob);
+
+    const round1 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_AUDIT_CONSENSUS);
+    const round2 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_REPUTATION_FINAL);
+    const aliceRound2 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REPUTATION_FINAL, alice.address);
+    const bobRound2 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REPUTATION_FINAL, bob.address);
+
+    expect(round1.score).to.equal(8000n);
+    expect(round2.score).to.equal(6000n);
+    expect(aliceRound2.reputationScore).to.equal(3250n);
+    expect(aliceRound2.weight).to.equal(3250n);
+    expect(bobRound2.reputationScore).to.equal(10000n);
+    expect(bobRound2.weight).to.equal(7777n);
+  });
+
+  it("records semantic slashing in round 2 accounting", async function () {
+    const fixture = await deployFixture();
+    const { requester, paymentRouter, reviewerRegistry, core, roundLedger } = fixture;
+    await core.setTierConfig(
+      FAST,
+      tierConfig({
+        reviewCommitQuorum: 2,
+        reviewRevealQuorum: 2,
+        auditCommitQuorum: 2,
+        auditRevealQuorum: 2,
+        auditTargetLimit: 2,
+        minIncomingAudit: 1,
+        auditCoverageQuorum: 7000,
+        contributionThreshold: 1000,
+        reviewEpochSize: 25,
+        auditEpochSize: 25,
+        finalityFactor: 2,
+        maxRetries: 0,
+        semanticStrikeThreshold: 1,
+        protocolFaultSlashBps: 500,
+        missedRevealSlashBps: 100,
+        semanticSlashBps: 200,
+        cooldownBlocks: 100,
+        reviewCommitTimeout: 30 * 60,
+        reviewRevealTimeout: 30 * 60,
+        auditCommitTimeout: 30 * 60,
+        auditRevealTimeout: 30 * 60
+      })
+    );
+
+    const requestId = await createRequest(paymentRouter, requester, FAST, 0n, "semantic-slash");
+    const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
+    const bobStakeBefore = (await reviewerRegistry.getReviewer(bob.address)).stake;
+
+    await finishAuditWithPair(fixture, requestId, alice, bob, 0, 9000);
+
+    const bobStakeAfter = (await reviewerRegistry.getReviewer(bob.address)).stake;
+    const bobAccounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_REPUTATION_FINAL, bob.address);
+    const bobRound2 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REPUTATION_FINAL, bob.address);
+
+    expect(bobRound2.weight).to.equal(0n);
+    expect(bobAccounting.semanticFault).to.equal(true);
+    expect(bobAccounting.slashed).to.equal(bobStakeBefore - bobStakeAfter);
+    expect(bobAccounting.slashed).to.be.gt(0n);
+    expect(bobAccounting.slashCount).to.equal(1n);
   });
 
   it("starts the highest priority queued request first", async function () {
@@ -525,7 +673,7 @@ describe("DAIOCore", function () {
   });
 
   it("slashes invalid VRF proofs without accepting the commit", async function () {
-    const { requester, alice, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = await deployFixture();
+    const { requester, alice, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core, roundLedger } = await deployFixture();
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
     await core.startNextRequest();
@@ -538,7 +686,11 @@ describe("DAIOCore", function () {
     await commitReveal.connect(alice).commitReview(requestId, aliceReview.resultHash, aliceReview.seed, badProof);
 
     const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
+    const accounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_REVIEW, alice.address);
     expect(stakeAfter).to.be.lt(stakeBefore);
+    expect(accounting.slashed).to.equal(stakeBefore - stakeAfter);
+    expect(accounting.slashCount).to.equal(1n);
+    expect(accounting.protocolFault).to.equal(true);
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_COMMIT);
   });
 
@@ -557,7 +709,6 @@ describe("DAIOCore", function () {
     const stakeAfter = (await reviewerRegistry.getReviewer(reviewer.address)).stake;
     expect(stakeAfter).to.be.lt(stakeBefore);
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_COMMIT);
-    expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
   });
 
   it("requeues Standard requests once on review commit timeout", async function () {
@@ -575,6 +726,39 @@ describe("DAIOCore", function () {
     expect(request.retryCount).to.equal(1n);
     expect(request.committeeEpoch).to.be.gt(epochBefore);
     expect(request.activePriority).to.equal(priorityFee - 1n);
+  });
+
+  it("preserves aborted round history across retry cleanup", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core, roundLedger } = fixture;
+    const requestId = await createRequest(paymentRouter, requester, STANDARD, ethers.parseEther("1"), "standard-partial-retry");
+
+    await core.startNextRequest();
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId, fixture.reviewers, 3n);
+    const aliceReview = await buildReviewCommit(commitReveal, requestId, alice, 8000, "ipfs://partial-alice", "partial-alice");
+    const bobReview = await buildReviewCommit(commitReveal, requestId, bob, 6000, "ipfs://partial-bob", "partial-bob");
+    await commitReview(commitReveal, alice, requestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
+    await commitReveal.connect(alice).revealReview(requestId, aliceReview.proposalScore, aliceReview.reportHash, aliceReview.reportURI, aliceReview.seed);
+
+    const bobStakeBefore = (await reviewerRegistry.getReviewer(bob.address)).stake;
+    await time.increase(2 * 60 * 60 + 1);
+    await core.handleTimeout(requestId);
+    const bobStakeAfter = (await reviewerRegistry.getReviewer(bob.address)).stake;
+
+    const latestAttempt = (await core.getRequestLifecycle(requestId)).retryCount;
+    const oldRound0 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_REVIEW);
+    const oldAliceRound0 = await roundLedger.getReviewerRoundScore(requestId, 0, ROUND_REVIEW, alice.address);
+    const oldBobAccounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_REVIEW, bob.address);
+
+    expect(latestAttempt).to.equal(1n);
+    expect(oldRound0.score).to.equal(8000n);
+    expect(oldRound0.closed).to.equal(true);
+    expect(oldRound0.aborted).to.equal(true);
+    expect(oldAliceRound0.available).to.equal(true);
+    expect(oldAliceRound0.score).to.equal(8000n);
+    expect(oldBobAccounting.slashed).to.equal(bobStakeBefore - bobStakeAfter);
+    expect(oldBobAccounting.protocolFault).to.equal(true);
   });
 
   it("admits newly selected reviewers after the retry epoch changes", async function () {
@@ -646,12 +830,11 @@ describe("DAIOCore", function () {
     expect(request.status).to.equal(AUDIT_COMMIT);
     expect(request.lowConfidence).to.equal(true);
     expect(bobStakeAfter).to.be.lt(bobStakeBefore);
-    expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
   });
 
   it("slashes and ignores non-canonical self-audit reveals", async function () {
     const fixture = await deployFixture();
-    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core, roundLedger } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
 
     const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
@@ -668,9 +851,12 @@ describe("DAIOCore", function () {
 
     const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
     const request = await core.getRequestLifecycle(requestId);
+    const accounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_AUDIT_CONSENSUS, alice.address);
 
     expect(stakeAfter).to.be.lt(stakeBefore);
-    expect((await core.getRequestFinalResult(requestId)).faultSignal).to.equal(1n);
+    expect(accounting.slashed).to.equal(stakeBefore - stakeAfter);
+    expect(accounting.slashCount).to.equal(1n);
+    expect(accounting.protocolFault).to.equal(true);
     expect(request.status).to.equal(5n);
   });
 
@@ -727,7 +913,7 @@ describe("DAIOCore", function () {
 
   it("marks Critical requests unresolved instead of finalizing below coverage quorum", async function () {
     const fixture = await deployFixture();
-    const { requester, commitReveal, paymentRouter, vrfProof, core } = fixture;
+    const { requester, commitReveal, paymentRouter, vrfProof, core, roundLedger } = fixture;
     const requestId = await createRequest(paymentRouter, requester, CRITICAL, 0n, "critical-low-coverage");
 
     await core.startNextRequest();
@@ -751,9 +937,10 @@ describe("DAIOCore", function () {
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
     await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
 
-    const result = await core.getRequestFinalResult(requestId);
-    expect(result.status).to.equal(UNRESOLVED);
-    expect(result.auditCoverage).to.equal(0n);
+    const lifecycle = await core.getRequestLifecycle(requestId);
+    const round1 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_AUDIT_CONSENSUS);
+    expect(lifecycle.status).to.equal(UNRESOLVED);
+    expect(round1.coverage).to.equal(0n);
   });
 
   it("excludes reviewers from eligibility after enough low long-term reputation samples", async function () {
