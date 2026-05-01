@@ -98,7 +98,8 @@ describe("PROPOSAL parity modules", function () {
       treasury.address,
       await commitReveal.getAddress(),
       await priorityQueue.getAddress(),
-      await vrfCoordinator.getAddress()
+      await vrfCoordinator.getAddress(),
+      1
     );
     await core.waitForDeployment();
 

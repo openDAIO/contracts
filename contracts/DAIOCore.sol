@@ -216,6 +216,8 @@ contract DAIOCore {
     uint256 public baseRequestFee = 100 ether;
     uint256 internal constant protocolFeeBps = 1_000;
     uint256 internal requestCount;
+    uint256 internal _maxActiveRequests;
+    uint256 internal _activeRequestCount;
 
     uint256 private _locked = 1;
 
@@ -351,7 +353,7 @@ contract DAIOCore {
     mapping(uint256 requestId => mapping(address auditor => address[] targets)) private _canonicalTargetsByAuditor;
 
     event RequestFinalized(uint256 indexed requestId, uint256 finalProposalScore, uint256 confidence, bool lowConfidence);
-    event ReviewRevealed(uint256 indexed requestId, address indexed reviewer, uint16 proposalScore, bytes32 reportHash, string reportURI);
+    event ReviewRevealed(uint256 requestId, address reviewer, uint16 proposalScore, bytes32 reportHash, string reportURI);
     event StatusChanged(uint256 indexed requestId, RequestStatus status);
 
     error AlreadySubmitted();
@@ -384,7 +386,8 @@ contract DAIOCore {
         address treasury_,
         address commitReveal_,
         address priorityQueue_,
-        address vrfCoordinator_
+        address vrfCoordinator_,
+        uint256 maxActiveRequests_
     ) {
         if (
             treasury_ == address(0) || commitReveal_ == address(0) || priorityQueue_ == address(0) || vrfCoordinator_ == address(0)
@@ -397,7 +400,11 @@ contract DAIOCore {
         vrfCoordinator = IDAIOVRFCoordinator(vrfCoordinator_);
         owner = msg.sender;
         treasury = treasury_;
+        _maxActiveRequests = maxActiveRequests_;
+    }
 
+    function maxActiveRequests() external view returns (uint256) {
+        return _maxActiveRequests;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -504,6 +511,8 @@ contract DAIOCore {
     }
 
     function startNextRequest() external returns (uint256 requestId) {
+        if (_activeRequestCount >= _maxActiveRequests) revert BadConfig();
+
         while (priorityQueue.currentSize() > 0) {
             (, uint256 candidateId) = priorityQueue.popRequest();
             if (requests[candidateId].status == RequestStatus.Queued) {
@@ -514,6 +523,7 @@ contract DAIOCore {
 
         if (requestId == 0) revert QueueEmpty();
 
+        _activeRequestCount++;
         _advance(requestId, RequestStatus.ReviewCommit);
     }
 
@@ -888,6 +898,7 @@ contract DAIOCore {
         request_.finalReliability = data.output.confidence;
         request_.lowConfidence = data.output.lowConfidence || finalLowConfidence;
         request_.status = RequestStatus.Finalized;
+        _releaseActiveSlot();
 
         uint256 rewardPool = request_.rewardPool;
         IDAIORoundLedgerLike ledger = roundLedger;
@@ -1076,6 +1087,7 @@ contract DAIOCore {
         request_.rewardPool = 0;
         request_.protocolFee = 0;
         request_.status = RequestStatus.Cancelled;
+        _releaseActiveSlot();
         stakeVault.refundRequest(requestId, request_.requester);
 
         emit StatusChanged(requestId, RequestStatus.Cancelled);
@@ -1090,6 +1102,7 @@ contract DAIOCore {
         request_.rewardPool = 0;
         request_.protocolFee = 0;
         request_.status = status;
+        _releaseActiveSlot();
         stakeVault.refundRequest(requestId, request_.requester);
 
         emit StatusChanged(requestId, status);
@@ -1115,6 +1128,7 @@ contract DAIOCore {
         }
         request_.activePriority = pmax > 0 ? pmax - 1 : 0;
         request_.status = RequestStatus.Queued;
+        _releaseActiveSlot();
         request_.phaseStartedAt = block.timestamp;
         request_.phaseStartedBlock = block.number;
 
@@ -1265,6 +1279,11 @@ contract DAIOCore {
         request_.phaseStartedAt = block.timestamp;
         request_.phaseStartedBlock = block.number;
         emit StatusChanged(requestId, status);
+    }
+
+    function _releaseActiveSlot() internal {
+        if (_activeRequestCount == 0) return;
+        _activeRequestCount--;
     }
 
     function _requireRequest(uint256 requestId) internal view returns (Request storage request_) {

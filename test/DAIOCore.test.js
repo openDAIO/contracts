@@ -13,6 +13,7 @@ const REVIEW_COMMIT = 2n;
 const REVIEW_REVEAL = 3n;
 const AUDIT_COMMIT = 4n;
 const UNRESOLVED = 9n;
+const CANCELLED = 7n;
 const SCALE = 10000n;
 const ROUND_REVIEW = 0;
 const ROUND_AUDIT_CONSENSUS = 1;
@@ -73,7 +74,7 @@ function tierConfig({
 }
 
 describe("DAIOCore", function () {
-  async function deployFixture() {
+  async function deployFixture(maxActiveRequests = 1) {
     const signers = await ethers.getSigners();
     const [owner, treasury, requester] = signers;
     const reviewerSigners = signers.slice(3);
@@ -128,7 +129,8 @@ describe("DAIOCore", function () {
       treasury.address,
       await commitReveal.getAddress(),
       await priorityQueue.getAddress(),
-      await vrfCoordinator.getAddress()
+      await vrfCoordinator.getAddress(),
+      maxActiveRequests
     );
     await core.waitForDeployment();
 
@@ -299,10 +301,11 @@ describe("DAIOCore", function () {
   }
 
   async function createRequest(paymentRouter, requester, tier, priorityFee = 0n, label = "proposal-1") {
-    await paymentRouter
+    const tx = await paymentRouter
       .connect(requester)
       .createRequestWithUSDAIO(`ipfs://${label}`, ethers.id(label), ethers.id(`${label}:rubric`), DOMAIN_RESEARCH, tier, priorityFee);
-    return 1n;
+    await tx.wait();
+    return paymentRouter.latestRequestByRequester(requester.address);
   }
 
   function sortitionScore(phase, requestId, participant, subject, randomness) {
@@ -676,6 +679,87 @@ describe("DAIOCore", function () {
     expect((await core.getRequestLifecycle(2)).status).to.equal(REVIEW_COMMIT);
   });
 
+  it("enforces maxActiveRequests as an on-chain permissionless cap", async function () {
+    const { requester, paymentRouter, core } = await deployFixture();
+
+    await createRequest(paymentRouter, requester, FAST, 0n, "cap-1");
+    await createRequest(paymentRouter, requester, FAST, 0n, "cap-2");
+
+    expect(await core.maxActiveRequests()).to.equal(1n);
+
+    await core.startNextRequest();
+
+    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "BadConfig");
+  });
+
+  it("allows multiple active requests up to the constructor cap", async function () {
+    const { requester, paymentRouter, core } = await deployFixture(2);
+
+    await createRequest(paymentRouter, requester, FAST, 0n, "cap-open-1");
+    await createRequest(paymentRouter, requester, FAST, 0n, "cap-open-2");
+
+    await core.startNextRequest();
+    await core.startNextRequest();
+
+    expect((await core.getRequestLifecycle(1)).status).to.equal(REVIEW_COMMIT);
+    expect((await core.getRequestLifecycle(2)).status).to.equal(REVIEW_COMMIT);
+  });
+
+  it("caps over-quorum review joins even when more reviewers pass sortition", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
+    await core.setTierConfig(
+      FAST,
+      {
+        ...tierConfig({
+          reviewCommitQuorum: 3,
+          reviewRevealQuorum: 3,
+          auditCommitQuorum: 3,
+          auditRevealQuorum: 3,
+          auditTargetLimit: 2,
+          minIncomingAudit: 1,
+          auditCoverageQuorum: 7000,
+          contributionThreshold: 1000,
+          reviewEpochSize: 25,
+          auditEpochSize: 25,
+          finalityFactor: 2,
+          maxRetries: 0,
+          protocolFaultSlashBps: 500,
+          missedRevealSlashBps: 100,
+          semanticSlashBps: 200,
+          cooldownBlocks: 100,
+          reviewCommitTimeout: 30 * 60,
+          reviewRevealTimeout: 30 * 60,
+          auditCommitTimeout: 30 * 60,
+          auditRevealTimeout: 30 * 60
+        }),
+        reviewElectionDifficulty: 10000,
+        auditElectionDifficulty: 10000
+      }
+    );
+
+    const requestId = await createRequest(paymentRouter, requester, FAST, 0n, "over-quorum");
+    await core.startNextRequest();
+
+    const reviewers = fixture.reviewers.slice(0, 4);
+    for (let i = 0; i < reviewers.length; i++) {
+      const review = await buildReviewCommit(
+        commitReveal,
+        requestId,
+        reviewers[i],
+        7000 + i,
+        `ipfs://over-quorum-${i}`,
+        `over-quorum-${i}`
+      );
+      await commitReview(commitReveal, reviewers[i], requestId, review, vrfProof);
+    }
+
+    const participants = await commitReveal.getReviewParticipants(requestId, 0);
+    expect(participants).to.deep.equal(reviewers.slice(0, 3).map((reviewer) => reviewer.address));
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_REVEAL);
+    expect(await reviewerRegistry.requestLockedStake(requestId, reviewers[3].address)).to.equal(0n);
+  });
+
   it("slashes invalid VRF proofs without accepting the commit", async function () {
     const { requester, alice, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core, roundLedger } = await deployFixture();
     const requestId = await createRequest(paymentRouter, requester, FAST);
@@ -806,6 +890,73 @@ describe("DAIOCore", function () {
     await commitReview(commitReveal, bob, requestId, bobReview, vrfProof);
 
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_REVEAL);
+  });
+
+  it("handles retry epoch selection while maxActiveRequests capacity is temporarily unavailable", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, vrfProof, core } = fixture;
+    const firstRequestId = await createRequest(paymentRouter, requester, STANDARD, ethers.parseEther("1"), "cap-retry-1");
+
+    await core.startNextRequest();
+    const initialLifecycle = await core.getRequestLifecycle(firstRequestId);
+    const initialPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
+    const initiallySelected = new Set();
+    for (const reviewer of fixture.reviewers) {
+      const pass = await sortitionPass(
+        fixture,
+        firstRequestId,
+        REVIEW_SORTITION,
+        initialLifecycle.committeeEpoch,
+        reviewer,
+        null,
+        initialPhaseStartedBlock,
+        3
+      );
+      if (pass) initiallySelected.add(reviewer.address);
+    }
+
+    const secondRequestId = await createRequest(paymentRouter, requester, FAST, ethers.parseEther("5"), "cap-retry-2");
+
+    await time.increase(2 * 60 * 60 + 1);
+    await core.handleTimeout(firstRequestId);
+    const retryQueued = await core.getRequestLifecycle(firstRequestId);
+    expect(retryQueued.status).to.equal(QUEUED);
+    expect(retryQueued.committeeEpoch).to.be.gt(initialLifecycle.committeeEpoch);
+
+    await core.startNextRequest();
+    expect((await core.getRequestLifecycle(secondRequestId)).status).to.equal(REVIEW_COMMIT);
+    expect((await core.getRequestLifecycle(firstRequestId)).status).to.equal(QUEUED);
+
+    const ignoredReview = await buildReviewCommit(
+      commitReveal,
+      firstRequestId,
+      fixture.alice,
+      8000,
+      "ipfs://queued-review",
+      "queued-review"
+    );
+    await commitReview(commitReveal, fixture.alice, firstRequestId, ignoredReview, vrfProof);
+    expect(await commitReveal.getReviewParticipants(firstRequestId, retryQueued.retryCount)).to.deep.equal([]);
+    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "BadConfig");
+
+    await time.increase(30 * 60 + 1);
+    await core.handleTimeout(secondRequestId);
+    expect((await core.getRequestLifecycle(secondRequestId)).status).to.equal(CANCELLED);
+
+    await core.startNextRequest();
+    const retryActive = await core.getRequestLifecycle(firstRequestId);
+    expect(retryActive.status).to.equal(REVIEW_COMMIT);
+
+    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, firstRequestId, fixture.reviewers, 3n, initiallySelected);
+    expect(!initiallySelected.has(alice.address) || !initiallySelected.has(bob.address)).to.equal(true);
+
+    const aliceReview = await buildReviewCommit(commitReveal, firstRequestId, alice, 8000, "ipfs://retry-cap-alice", "retry-cap-alice");
+    const bobReview = await buildReviewCommit(commitReveal, firstRequestId, bob, 6000, "ipfs://retry-cap-bob", "retry-cap-bob");
+    await commitReview(commitReveal, alice, firstRequestId, aliceReview, vrfProof);
+    await commitReview(commitReveal, bob, firstRequestId, bobReview, vrfProof);
+
+    expect((await core.getRequestLifecycle(firstRequestId)).status).to.equal(REVIEW_REVEAL);
+    expect(await commitReveal.getReviewParticipants(firstRequestId, retryActive.retryCount)).to.deep.equal([alice.address, bob.address]);
   });
 
   it("slashes missed review reveals and continues Fast requests as low-confidence", async function () {
