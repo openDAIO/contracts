@@ -101,7 +101,13 @@ async function deployForkFixture() {
   await vrfCoordinator.waitForDeployment();
 
   const DAIOCore = await ethers.getContractFactory("DAIOCore");
-  const core = await DAIOCore.deploy(treasury.address, await commitReveal.getAddress(), await priorityQueue.getAddress(), await vrfCoordinator.getAddress());
+  const core = await DAIOCore.deploy(
+    treasury.address,
+    await commitReveal.getAddress(),
+    await priorityQueue.getAddress(),
+    await vrfCoordinator.getAddress(),
+    1
+  );
   await core.waitForDeployment();
 
   const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");

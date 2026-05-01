@@ -19,6 +19,14 @@ function envAddress(name, fallback) {
   return ethers.getAddress(value);
 }
 
+function envUint(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
+  return parsed;
+}
+
 function config({
   reviewCommitQuorum,
   reviewRevealQuorum,
@@ -39,8 +47,8 @@ function config({
   auditRevealTimeout
 }) {
   return {
-    reviewElectionDifficulty: 5000,
-    auditElectionDifficulty: 5000,
+    reviewElectionDifficulty: 8000,
+    auditElectionDifficulty: 10000,
     reviewCommitQuorum,
     reviewRevealQuorum,
     auditCommitQuorum,
@@ -222,7 +230,8 @@ async function main() {
     deployer.address,
     await commitReveal.getAddress(),
     await priorityQueue.getAddress(),
-    await vrfCoordinator.getAddress()
+    await vrfCoordinator.getAddress(),
+    envUint("DAIO_MAX_ACTIVE_REQUESTS", 2)
   );
   await core.waitForDeployment();
 
