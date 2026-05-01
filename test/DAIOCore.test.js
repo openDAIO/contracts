@@ -689,7 +689,7 @@ describe("DAIOCore", function () {
 
     await core.startNextRequest();
 
-    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "BadConfig");
+    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "TooEarly");
   });
 
   it("allows multiple active requests up to the constructor cap", async function () {
@@ -758,6 +758,20 @@ describe("DAIOCore", function () {
     expect(participants).to.deep.equal(reviewers.slice(0, 3).map((reviewer) => reviewer.address));
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_REVEAL);
     expect(await reviewerRegistry.requestLockedStake(requestId, reviewers[3].address)).to.equal(0n);
+  });
+
+  it("limits concurrently active requests to two", async function () {
+    const { requester, paymentRouter, core } = await deployFixture(2);
+
+    await createRequest(paymentRouter, requester, FAST, 0n, "active-1");
+    await createRequest(paymentRouter, requester, FAST, ethers.parseEther("1"), "active-2");
+    await createRequest(paymentRouter, requester, FAST, ethers.parseEther("2"), "active-3");
+
+    await core.startNextRequest();
+    await core.startNextRequest();
+
+    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "TooEarly");
+    expect((await core.getRequestLifecycle(1)).status).to.equal(QUEUED);
   });
 
   it("slashes invalid VRF proofs without accepting the commit", async function () {
@@ -937,7 +951,7 @@ describe("DAIOCore", function () {
     );
     await commitReview(commitReveal, fixture.alice, firstRequestId, ignoredReview, vrfProof);
     expect(await commitReveal.getReviewParticipants(firstRequestId, retryQueued.retryCount)).to.deep.equal([]);
-    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "BadConfig");
+    await expect(core.startNextRequest()).to.be.revertedWithCustomError(core, "TooEarly");
 
     await time.increase(30 * 60 + 1);
     await core.handleTimeout(secondRequestId);

@@ -67,12 +67,20 @@ contract PaymentRouter {
     uint8 internal constant STATUS_QUEUED = 1;
     uint8 internal constant STATUS_AUDIT_REVEAL = 5;
     uint8 internal constant STATUS_FINALIZED = 6;
+    bytes32 internal constant DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 internal constant REQUEST_TYPEHASH = keccak256(
+        "RequestIntent(address requester,bytes32 proposalURIHash,bytes32 proposalHash,bytes32 rubricHash,uint256 domainMask,uint8 tier,uint256 priorityFee,uint256 nonce,uint256 deadline)"
+    );
+    bytes32 internal constant NAME_HASH = keccak256("DAIOPaymentRouter");
+    bytes32 internal constant VERSION_HASH = keccak256("1");
+    uint256 internal constant SECP256K1N_DIV_2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
     IERC20Minimal public immutable usdaio;
     IDAIOCorePayment public immutable core;
     IAcceptedTokenRegistry public immutable acceptedTokenRegistry;
     IUniswapV4SwapAdapter public immutable swapAdapter;
     mapping(address requester => uint256 requestId) public latestRequestByRequester;
+    mapping(address requester => uint256 nonce) public nonces;
 
     event RequestPaid(address indexed requester, uint256 indexed requestId, address indexed paymentToken, uint256 amountPaid);
 
@@ -95,12 +103,61 @@ contract PaymentRouter {
         uint8 tier,
         uint256 priorityFee
     ) external returns (uint256 requestId) {
+        requestId = _createRequestWithUSDAIOFrom(msg.sender, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
+    }
+
+    function createRequestWithUSDAIOBySig(
+        address requester,
+        string calldata proposalURI,
+        bytes32 proposalHash,
+        bytes32 rubricHash,
+        uint256 domainMask,
+        uint8 tier,
+        uint256 priorityFee,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (uint256 requestId) {
+        require(requester != address(0), "PaymentRouter: bad requester");
+        require(block.timestamp <= deadline, "PaymentRouter: expired");
+
+        uint256 nonce = nonces[requester]++;
+        bytes32 structHash = keccak256(
+            abi.encode(
+                REQUEST_TYPEHASH,
+                requester,
+                keccak256(bytes(proposalURI)),
+                proposalHash,
+                rubricHash,
+                domainMask,
+                tier,
+                priorityFee,
+                nonce,
+                deadline
+            )
+        );
+        require(_recover(_hashTypedData(structHash), signature) == requester, "PaymentRouter: bad signature");
+        requestId = _createRequestWithUSDAIOFrom(requester, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
+    }
+
+    function domainSeparator() external view returns (bytes32) {
+        return _domainSeparator();
+    }
+
+    function _createRequestWithUSDAIOFrom(
+        address requester,
+        string calldata proposalURI,
+        bytes32 proposalHash,
+        bytes32 rubricHash,
+        uint256 domainMask,
+        uint8 tier,
+        uint256 priorityFee
+    ) internal returns (uint256 requestId) {
         uint256 requiredUsdaio = core.baseRequestFee() + priorityFee;
-        require(usdaio.transferFrom(msg.sender, address(this), requiredUsdaio), "PaymentRouter: pull USDAIO failed");
+        require(usdaio.transferFrom(requester, address(this), requiredUsdaio), "PaymentRouter: pull USDAIO failed");
         require(usdaio.approve(core.stakeVault(), requiredUsdaio), "PaymentRouter: approve failed");
-        requestId = core.createRequestFor(msg.sender, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
-        latestRequestByRequester[msg.sender] = requestId;
-        emit RequestPaid(msg.sender, requestId, address(usdaio), requiredUsdaio);
+        requestId = core.createRequestFor(requester, proposalURI, proposalHash, rubricHash, domainMask, tier, priorityFee);
+        latestRequestByRequester[requester] = requestId;
+        emit RequestPaid(requester, requestId, address(usdaio), requiredUsdaio);
     }
 
     function createRequestWithERC20(
@@ -172,5 +229,30 @@ contract PaymentRouter {
         (, status,,,,,,,) = core.getRequestLifecycle(requestId);
         processing = status >= STATUS_QUEUED && status <= STATUS_AUDIT_REVEAL;
         completed = status >= STATUS_FINALIZED;
+    }
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)));
+    }
+
+    function _hashTypedData(bytes32 structHash) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+    }
+
+    function _recover(bytes32 digest, bytes calldata signature) internal pure returns (address signer) {
+        require(signature.length == 65, "PaymentRouter: bad signature");
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 32))
+            v := byte(0, calldataload(add(signature.offset, 64)))
+        }
+        if (v < 27) v += 27;
+        require(v == 27 || v == 28, "PaymentRouter: bad signature");
+        require(uint256(s) <= SECP256K1N_DIV_2, "PaymentRouter: bad signature");
+        signer = ecrecover(digest, v, r, s);
+        require(signer != address(0), "PaymentRouter: bad signature");
     }
 }

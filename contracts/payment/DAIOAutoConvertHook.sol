@@ -48,9 +48,9 @@ contract DAIOAutoConvertHook is BaseHook {
         _;
     }
 
-    constructor(IPoolManager poolManager, address paymentRouter_, address usdaio_) BaseHook(poolManager) {
-        require(paymentRouter_ != address(0) && usdaio_ != address(0), "DAIOAutoConvertHook: bad config");
-        owner = msg.sender;
+    constructor(IPoolManager poolManager, address paymentRouter_, address usdaio_, address owner_) BaseHook(poolManager) {
+        require(paymentRouter_ != address(0) && usdaio_ != address(0) && owner_ != address(0), "DAIOAutoConvertHook: bad config");
+        owner = owner_;
         paymentRouter = paymentRouter_;
         usdaio = Currency.wrap(usdaio_);
         intentWriters[paymentRouter_] = true;

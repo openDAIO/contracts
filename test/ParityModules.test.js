@@ -49,6 +49,42 @@ function sortCurrencies(a, b) {
   return BigInt(a) < BigInt(b) ? [a, b] : [b, a];
 }
 
+async function signRequestIntent(paymentRouter, requester, values) {
+  const chainId = (await ethers.provider.getNetwork()).chainId;
+  return requester.signTypedData(
+    {
+      name: "DAIOPaymentRouter",
+      version: "1",
+      chainId,
+      verifyingContract: await paymentRouter.getAddress()
+    },
+    {
+      RequestIntent: [
+        { name: "requester", type: "address" },
+        { name: "proposalURIHash", type: "bytes32" },
+        { name: "proposalHash", type: "bytes32" },
+        { name: "rubricHash", type: "bytes32" },
+        { name: "domainMask", type: "uint256" },
+        { name: "tier", type: "uint8" },
+        { name: "priorityFee", type: "uint256" },
+        { name: "nonce", type: "uint256" },
+        { name: "deadline", type: "uint256" }
+      ]
+    },
+    {
+      requester: requester.address,
+      proposalURIHash: ethers.keccak256(ethers.toUtf8Bytes(values.proposalURI)),
+      proposalHash: values.proposalHash,
+      rubricHash: values.rubricHash,
+      domainMask: values.domainMask,
+      tier: values.tier,
+      priorityFee: values.priorityFee,
+      nonce: await paymentRouter.nonces(requester.address),
+      deadline: values.deadline
+    }
+  );
+}
+
 describe("PROPOSAL parity modules", function () {
   async function deployCoreFixture() {
     const [owner, treasury, requester, alice, bob] = await ethers.getSigners();
@@ -99,7 +135,7 @@ describe("PROPOSAL parity modules", function () {
       await commitReveal.getAddress(),
       await priorityQueue.getAddress(),
       await vrfCoordinator.getAddress(),
-      1
+      2
     );
     await core.waitForDeployment();
 
@@ -331,6 +367,87 @@ describe("PROPOSAL parity modules", function () {
     expect(latest.completed).to.equal(false);
   });
 
+  it("lets a relayer submit a signed USDAIO request while preserving the requester", async function () {
+    const { requester, alice: relayer, usdaio, stakeVault, core } = await deployCoreFixture();
+    const { paymentRouter } = await deployPaymentFixture(usdaio, core);
+
+    const priorityFee = ethers.parseEther("3");
+    const required = (await core.baseRequestFee()) + priorityFee;
+    await usdaio.mint(requester.address, required);
+    await usdaio.connect(requester).approve(await paymentRouter.getAddress(), required);
+
+    const block = await ethers.provider.getBlock("latest");
+    const intent = {
+      proposalURI: "ipfs://gasless-proposal",
+      proposalHash: ethers.id("gasless-proposal"),
+      rubricHash: ethers.id("gasless-rubric"),
+      domainMask: DOMAIN_RESEARCH,
+      tier: FAST,
+      priorityFee,
+      deadline: BigInt(block.timestamp + 3600)
+    };
+    const signature = await signRequestIntent(paymentRouter, requester, intent);
+
+    await expect(
+      paymentRouter
+        .connect(relayer)
+        .createRequestWithUSDAIOBySig(
+          requester.address,
+          "ipfs://tampered-proposal",
+          intent.proposalHash,
+          intent.rubricHash,
+          intent.domainMask,
+          intent.tier,
+          intent.priorityFee,
+          intent.deadline,
+          signature
+        )
+    ).to.be.revertedWith("PaymentRouter: bad signature");
+    expect(await paymentRouter.nonces(requester.address)).to.equal(0n);
+
+    await expect(
+      paymentRouter
+        .connect(relayer)
+        .createRequestWithUSDAIOBySig(
+          requester.address,
+          intent.proposalURI,
+          intent.proposalHash,
+          intent.rubricHash,
+          intent.domainMask,
+          intent.tier,
+          intent.priorityFee,
+          intent.deadline,
+          signature
+        )
+    )
+      .to.emit(paymentRouter, "RequestPaid")
+      .withArgs(requester.address, 1n, await usdaio.getAddress(), required);
+
+    const request = await core.getRequestLifecycle(1);
+    expect(request.requester).to.equal(requester.address);
+    expect(request.status).to.equal(QUEUED);
+    expect(await stakeVault.requestRewardPool(1)).to.equal((required * 9000n) / 10000n);
+    expect(await paymentRouter.latestRequestByRequester(requester.address)).to.equal(1n);
+    expect(await paymentRouter.latestRequestByRequester(relayer.address)).to.equal(0n);
+    expect(await paymentRouter.nonces(requester.address)).to.equal(1n);
+
+    await expect(
+      paymentRouter
+        .connect(relayer)
+        .createRequestWithUSDAIOBySig(
+          requester.address,
+          intent.proposalURI,
+          intent.proposalHash,
+          intent.rubricHash,
+          intent.domainMask,
+          intent.tier,
+          intent.priorityFee,
+          intent.deadline,
+          signature
+        )
+    ).to.be.revertedWith("PaymentRouter: bad signature");
+  });
+
   it("swaps accepted ERC20 exact-output payments, consumes hook validation, and refunds leftover input", async function () {
     const { requester, owner, usdaio, core } = await deployCoreFixture();
     const { inputToken, universalRouter, paymentRouter, acceptedTokenRegistry, swapAdapter } = await deployPaymentFixture(usdaio, core);
@@ -339,7 +456,7 @@ describe("PROPOSAL parity modules", function () {
     const poolManager = await MockV4PoolManager.deploy();
     await poolManager.waitForDeployment();
     const DAIOAutoConvertHook = await ethers.getContractFactory("DAIOAutoConvertHook");
-    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress());
+    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress(), owner.address);
     await hook.waitForDeployment();
     await hook.setIntentWriter(await swapAdapter.getAddress(), true);
     await hook.setAllowedRouter(await universalRouter.getAddress(), true);
@@ -411,14 +528,14 @@ describe("PROPOSAL parity modules", function () {
   });
 
   it("reverts adapter swaps when Universal Router does not consume hook validation", async function () {
-    const { requester, usdaio, core } = await deployCoreFixture();
+    const { requester, owner, usdaio, core } = await deployCoreFixture();
     const { inputToken, universalRouter, paymentRouter, acceptedTokenRegistry, swapAdapter } = await deployPaymentFixture(usdaio, core);
 
     const MockV4PoolManager = await ethers.getContractFactory("MockV4PoolManager");
     const poolManager = await MockV4PoolManager.deploy();
     await poolManager.waitForDeployment();
     const DAIOAutoConvertHook = await ethers.getContractFactory("DAIOAutoConvertHook");
-    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress());
+    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), await paymentRouter.getAddress(), await usdaio.getAddress(), owner.address);
     await hook.waitForDeployment();
     await hook.setIntentWriter(await swapAdapter.getAddress(), true);
     await swapAdapter.setAutoConvertHook(await hook.getAddress());
@@ -470,7 +587,7 @@ describe("PROPOSAL parity modules", function () {
     const poolManager = await MockV4PoolManager.deploy();
     await poolManager.waitForDeployment();
     const DAIOAutoConvertHook = await ethers.getContractFactory("DAIOAutoConvertHook");
-    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), owner.address, await usdaio.getAddress());
+    const hook = await DAIOAutoConvertHook.deploy(await poolManager.getAddress(), owner.address, await usdaio.getAddress(), owner.address);
     await hook.waitForDeployment();
     await hook.setAllowedRouter(router.address, true);
 

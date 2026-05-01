@@ -214,10 +214,10 @@ contract DAIOCore {
     IDAIORoundLedgerLike internal roundLedger;
 
     uint256 public baseRequestFee = 100 ether;
+    uint256 public immutable maxActiveRequests;
+    uint256 internal activeRequestCount;
     uint256 internal constant protocolFeeBps = 1_000;
     uint256 internal requestCount;
-    uint256 internal _maxActiveRequests;
-    uint256 internal _activeRequestCount;
 
     uint256 private _locked = 1;
 
@@ -391,6 +391,7 @@ contract DAIOCore {
     ) {
         if (
             treasury_ == address(0) || commitReveal_ == address(0) || priorityQueue_ == address(0) || vrfCoordinator_ == address(0)
+                || maxActiveRequests_ == 0
         ) {
             revert InvalidAddress();
         }
@@ -400,11 +401,7 @@ contract DAIOCore {
         vrfCoordinator = IDAIOVRFCoordinator(vrfCoordinator_);
         owner = msg.sender;
         treasury = treasury_;
-        _maxActiveRequests = maxActiveRequests_;
-    }
-
-    function maxActiveRequests() external view returns (uint256) {
-        return _maxActiveRequests;
+        maxActiveRequests = maxActiveRequests_;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -511,7 +508,7 @@ contract DAIOCore {
     }
 
     function startNextRequest() external returns (uint256 requestId) {
-        if (_activeRequestCount >= _maxActiveRequests) revert BadConfig();
+        if (activeRequestCount >= maxActiveRequests) revert TooEarly();
 
         while (priorityQueue.currentSize() > 0) {
             (, uint256 candidateId) = priorityQueue.popRequest();
@@ -523,7 +520,7 @@ contract DAIOCore {
 
         if (requestId == 0) revert QueueEmpty();
 
-        _activeRequestCount++;
+        activeRequestCount++;
         _advance(requestId, RequestStatus.ReviewCommit);
     }
 
@@ -540,7 +537,7 @@ contract DAIOCore {
         Request storage request_ = _requireStatus(requestId, RequestStatus.ReviewCommit);
         if (!_eligibleForRequest(reviewer, request_.domainMask)) revert IneligibleReviewer();
 
-        bytes32 commitHash = commitReveal.saved_commits(reviewCommitRound(requestId), reviewer);
+        bytes32 commitHash = commitReveal.saved_commits(_reviewCommitRound(requestId), reviewer);
         if (commitHash == bytes32(0)) revert BadCommitment();
 
         (bool vrfOk, bytes32 randomness) = _tryVrfRandomness(requestId, REVIEW_SORTITION, request_.committeeEpoch, reviewer, address(0), vrfProof);
@@ -591,7 +588,7 @@ contract DAIOCore {
         }
 
         bytes32 resultHash = _hashReviewReveal(requestId, reviewer, proposalScore, reportHash, reportURI);
-        try commitReveal.reveal_hashed(resultHash, reviewer, seed, reviewCommitRound(requestId)) returns (bool ok) {
+        try commitReveal.reveal_hashed(resultHash, reviewer, seed, _reviewCommitRound(requestId)) returns (bool ok) {
             if (!ok) {
                 _markProtocolFault(requestId, reviewer, "rm", request_.config.protocolFaultSlashBps);
                 return;
@@ -626,7 +623,7 @@ contract DAIOCore {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditCommit);
         if (!reviewSubmissions[requestId][auditor].revealed) revert IneligibleReviewer();
 
-        bytes32 commitHash = commitReveal.saved_commits(auditCommitRound(requestId), auditor);
+        bytes32 commitHash = commitReveal.saved_commits(_auditCommitRound(requestId), auditor);
         if (commitHash == bytes32(0)) revert BadCommitment();
 
         AuditSubmission storage submission = auditSubmissions[requestId][auditor];
@@ -691,7 +688,7 @@ contract DAIOCore {
         if (submission.revealed) revert AlreadySubmitted();
 
         bytes32 resultHash = _hashAuditReveal(requestId, auditor, targets, scores);
-        try commitReveal.reveal_hashed(resultHash, auditor, seed, auditCommitRound(requestId)) returns (bool ok) {
+        try commitReveal.reveal_hashed(resultHash, auditor, seed, _auditCommitRound(requestId)) returns (bool ok) {
             if (!ok) {
                 _markProtocolFault(requestId, auditor, "am", request_.config.protocolFaultSlashBps);
                 return;
@@ -826,11 +823,11 @@ contract DAIOCore {
         return keccak256(abi.encode(requestId, auditor, targets, scores));
     }
 
-    function reviewCommitRound(uint256 requestId) public view returns (uint256) {
+    function _reviewCommitRound(uint256 requestId) internal view returns (uint256) {
         return (requestId * 1_000_000) + (requests[requestId].committeeEpoch * 2);
     }
 
-    function auditCommitRound(uint256 requestId) public view returns (uint256) {
+    function _auditCommitRound(uint256 requestId) internal view returns (uint256) {
         return (requestId * 1_000_000) + (requests[requestId].auditEpoch * 2) + 1;
     }
 
@@ -1282,8 +1279,8 @@ contract DAIOCore {
     }
 
     function _releaseActiveSlot() internal {
-        if (_activeRequestCount == 0) return;
-        _activeRequestCount--;
+        if (activeRequestCount == 0) return;
+        activeRequestCount--;
     }
 
     function _requireRequest(uint256 requestId) internal view returns (Request storage request_) {

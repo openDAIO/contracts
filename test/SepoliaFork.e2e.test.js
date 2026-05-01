@@ -106,7 +106,7 @@ async function deployForkFixture() {
     await commitReveal.getAddress(),
     await priorityQueue.getAddress(),
     await vrfCoordinator.getAddress(),
-    1
+    2
   );
   await core.waitForDeployment();
 

@@ -3,9 +3,9 @@ const { ethers, network } = require("hardhat");
 const CREATE2_DEPLOYER = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
 const AFTER_SWAP_FLAG = 1n << 6n;
 const HOOK_FLAG_MASK = (1n << 14n) - 1n;
-
 const SEPOLIA = {
   chainId: 11155111,
+  ensRegistry: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
   usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
   uniswapV4PoolManager: "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
   universalRouter: "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
@@ -25,6 +25,12 @@ function envUint(name, fallback) {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative integer`);
   return parsed;
+}
+
+async function confirm(txPromise) {
+  const tx = await txPromise;
+  await tx.wait();
+  return tx;
 }
 
 function config({
@@ -75,13 +81,13 @@ function config({
 }
 
 async function configureTiers(core) {
-  await core.setTierConfig(
+  await confirm(core.setTierConfig(
     0,
     config({
-      reviewCommitQuorum: 2,
-      reviewRevealQuorum: 2,
-      auditCommitQuorum: 2,
-      auditRevealQuorum: 2,
+      reviewCommitQuorum: 3,
+      reviewRevealQuorum: 3,
+      auditCommitQuorum: 3,
+      auditRevealQuorum: 3,
       auditTargetLimit: 2,
       minIncomingAudit: 1,
       auditCoverageQuorum: 7000,
@@ -96,14 +102,14 @@ async function configureTiers(core) {
       auditCommitTimeout: 30 * 60,
       auditRevealTimeout: 30 * 60
     })
-  );
-  await core.setTierConfig(
+  ));
+  await confirm(core.setTierConfig(
     1,
     config({
-      reviewCommitQuorum: 2,
-      reviewRevealQuorum: 2,
-      auditCommitQuorum: 2,
-      auditRevealQuorum: 2,
+      reviewCommitQuorum: 3,
+      reviewRevealQuorum: 3,
+      auditCommitQuorum: 3,
+      auditRevealQuorum: 3,
       auditTargetLimit: 3,
       minIncomingAudit: 2,
       auditCoverageQuorum: 8000,
@@ -118,14 +124,14 @@ async function configureTiers(core) {
       auditCommitTimeout: 2 * 60 * 60,
       auditRevealTimeout: 2 * 60 * 60
     })
-  );
-  await core.setTierConfig(
+  ));
+  await confirm(core.setTierConfig(
     2,
     config({
-      reviewCommitQuorum: 2,
-      reviewRevealQuorum: 2,
-      auditCommitQuorum: 2,
-      auditRevealQuorum: 2,
+      reviewCommitQuorum: 3,
+      reviewRevealQuorum: 3,
+      auditCommitQuorum: 3,
+      auditRevealQuorum: 3,
       auditTargetLimit: 4,
       minIncomingAudit: 3,
       auditCoverageQuorum: 9000,
@@ -140,7 +146,7 @@ async function configureTiers(core) {
       auditCommitTimeout: 6 * 60 * 60,
       auditRevealTimeout: 6 * 60 * 60
     })
-  );
+  ));
 }
 
 function create2Address(deployer, salt, initCode) {
@@ -165,13 +171,13 @@ async function deployHookWithCreate2(poolManager, paymentRouter, usdaio) {
   }
 
   const Hook = await ethers.getContractFactory("DAIOAutoConvertHook");
-  const deployTx = await Hook.getDeployTransaction(poolManager, paymentRouter, usdaio);
+  const [owner] = await ethers.getSigners();
+  const deployTx = await Hook.getDeployTransaction(poolManager, paymentRouter, usdaio, owner.address);
   const initCode = deployTx.data;
   const mined = mineHookSalt(initCode);
   const existingCode = await ethers.provider.getCode(mined.address);
   if (existingCode === "0x") {
-    const [deployer] = await ethers.getSigners();
-    const tx = await deployer.sendTransaction({ to: CREATE2_DEPLOYER, data: ethers.concat([mined.salt, initCode]) });
+    const tx = await owner.sendTransaction({ to: CREATE2_DEPLOYER, data: ethers.concat([mined.salt, initCode]) });
     await tx.wait();
   }
   return Hook.attach(mined.address);
@@ -239,26 +245,26 @@ async function main() {
   const roundLedger = await DAIORoundLedger.deploy();
   await roundLedger.waitForDeployment();
 
-  await core.setModules(
+  await confirm(core.setModules(
     await stakeVault.getAddress(),
     await reviewerRegistry.getAddress(),
     await assignmentManager.getAddress(),
     await consensusScoring.getAddress(),
     await settlement.getAddress(),
     await reputationLedger.getAddress()
-  );
-  await roundLedger.setCore(await core.getAddress());
-  await core.setRoundLedger(await roundLedger.getAddress());
+  ));
+  await confirm(roundLedger.setCore(await core.getAddress()));
+  await confirm(core.setRoundLedger(await roundLedger.getAddress()));
   await configureTiers(core);
-  await stakeVault.setCoreOrSettlement(await core.getAddress());
-  await stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true);
-  await reviewerRegistry.setCore(await core.getAddress());
-  await reputationLedger.setCore(await core.getAddress());
-  await reviewerRegistry.setReputationGate(await reputationLedger.getAddress(), 3, 3000, 7000);
-  await commitReveal.setCore(await core.getAddress());
-  await priorityQueue.setCore(await core.getAddress());
+  await confirm(stakeVault.setCoreOrSettlement(await core.getAddress()));
+  await confirm(stakeVault.setAuthorized(await reviewerRegistry.getAddress(), true));
+  await confirm(reviewerRegistry.setCore(await core.getAddress()));
+  await confirm(reputationLedger.setCore(await core.getAddress()));
+  await confirm(reviewerRegistry.setReputationGate(await reputationLedger.getAddress(), 3, 3000, 7000));
+  await confirm(commitReveal.setCore(await core.getAddress()));
+  await confirm(priorityQueue.setCore(await core.getAddress()));
 
-  const ensRegistry = envAddress("ENS_REGISTRY_ADDRESS");
+  const ensRegistry = envAddress("ENS_REGISTRY_ADDRESS", isSepolia ? SEPOLIA.ensRegistry : undefined);
   let ensVerifier;
   if (ensRegistry) {
     const ENSVerifier = await ethers.getContractFactory("ENSVerifier");
@@ -273,14 +279,14 @@ async function main() {
     const ERC8004Adapter = await ethers.getContractFactory("ERC8004Adapter");
     erc8004Adapter = await ERC8004Adapter.deploy(erc8004IdentityRegistry, erc8004ReputationRegistry);
     await erc8004Adapter.waitForDeployment();
-    await erc8004Adapter.setWriter(await reputationLedger.getAddress());
-    await reputationLedger.setERC8004Adapter(await erc8004Adapter.getAddress());
+    await confirm(erc8004Adapter.setWriter(await reputationLedger.getAddress()));
+    await confirm(reputationLedger.setERC8004Adapter(await erc8004Adapter.getAddress()));
   }
   if (ensVerifier || erc8004Adapter) {
-    await reviewerRegistry.setIdentityModules(
+    await confirm(reviewerRegistry.setIdentityModules(
       ensVerifier ? await ensVerifier.getAddress() : ethers.ZeroAddress,
       erc8004Adapter ? await erc8004Adapter.getAddress() : ethers.ZeroAddress
-    );
+    ));
   }
 
   const AcceptedTokenRegistry = await ethers.getContractFactory("AcceptedTokenRegistry");
@@ -289,10 +295,10 @@ async function main() {
 
   const usdcAddress = envAddress("USDC_ADDRESS", isSepolia ? SEPOLIA.usdc : undefined);
   const usdtAddress = envAddress("USDT_ADDRESS");
-  if (usdcAddress) await acceptedTokenRegistry.setAcceptedToken(usdcAddress, true, true);
-  if (usdtAddress) await acceptedTokenRegistry.setAcceptedToken(usdtAddress, true, true);
+  if (usdcAddress) await confirm(acceptedTokenRegistry.setAcceptedToken(usdcAddress, true, true));
+  if (usdtAddress) await confirm(acceptedTokenRegistry.setAcceptedToken(usdtAddress, true, true));
   if (process.env.ACCEPT_ETH === "true" || isSepolia) {
-    await acceptedTokenRegistry.setAcceptedToken(ethers.ZeroAddress, true, true);
+    await confirm(acceptedTokenRegistry.setAcceptedToken(ethers.ZeroAddress, true, true));
   }
 
   const universalRouterAddress = envAddress("UNIVERSAL_ROUTER_ADDRESS", isSepolia ? SEPOLIA.universalRouter : undefined);
@@ -313,14 +319,14 @@ async function main() {
       await swapAdapter.getAddress()
     );
     await paymentRouter.waitForDeployment();
-    await core.setPaymentRouter(await paymentRouter.getAddress());
-    await swapAdapter.setPaymentRouter(await paymentRouter.getAddress());
+    await confirm(core.setPaymentRouter(await paymentRouter.getAddress()));
+    await confirm(swapAdapter.setPaymentRouter(await paymentRouter.getAddress()));
 
     if (poolManagerAddress && process.env.ENABLE_AUTO_CONVERT_HOOK === "true") {
       autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
-      await autoConvertHook.setIntentWriter(await swapAdapter.getAddress(), true);
-      await autoConvertHook.setAllowedRouter(universalRouterAddress, true);
-      await swapAdapter.setAutoConvertHook(await autoConvertHook.getAddress());
+      await confirm(autoConvertHook.setIntentWriter(await swapAdapter.getAddress(), true));
+      await confirm(autoConvertHook.setAllowedRouter(universalRouterAddress, true));
+      await confirm(swapAdapter.setAutoConvertHook(await autoConvertHook.getAddress()));
     }
   }
 

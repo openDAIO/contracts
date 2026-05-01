@@ -1,5 +1,7 @@
 require("@nomicfoundation/hardhat-toolbox");
 
+const optimizerRuns = Number(process.env.OPTIMIZER_RUNS || "0");
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
@@ -14,7 +16,7 @@ module.exports = {
           viaIR: true,
           optimizer: {
             enabled: true,
-            runs: 0
+            runs: optimizerRuns
           }
         }
       },
@@ -34,6 +36,7 @@ module.exports = {
       chainId: 31337
     },
     sepolia: {
+      chainId: 11155111,
       url: process.env.SEPOLIA_RPC_URL || "",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : []
     }

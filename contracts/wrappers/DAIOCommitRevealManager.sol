@@ -31,8 +31,6 @@ interface IDAIOCommitSink {
     ) external;
     function submitAuditCommitFor(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) external returns (bool accepted);
     function revealAuditFor(address auditor, uint256 requestId, address[] calldata targets, uint16[] calldata scores, uint256 seed) external;
-    function reviewCommitRound(uint256 requestId) external view returns (uint256);
-    function auditCommitRound(uint256 requestId) external view returns (uint256);
 }
 
 contract DAIOCommitRevealManager is CommitReveal {
@@ -76,8 +74,8 @@ contract DAIOCommitRevealManager is CommitReveal {
     function commitReview(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4] calldata vrfProof) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
         if (IDAIOCommitSink(core).syncRequest(requestId) != REVIEW_COMMIT) return;
-        (,,,, uint256 attempt,,,,) = IDAIOCommitSink(core).getRequestLifecycle(requestId);
-        commit_hashed(resultHash, seed, IDAIOCommitSink(core).reviewCommitRound(requestId));
+        (,,,, uint256 attempt, uint256 committeeEpoch,,,) = IDAIOCommitSink(core).getRequestLifecycle(requestId);
+        commit_hashed(resultHash, seed, (requestId * 1_000_000) + (committeeEpoch * 2));
         if (IDAIOCommitSink(core).submitReviewCommitFor(msg.sender, requestId, vrfProof)) {
             _recordParticipant(_reviewParticipants, _reviewParticipantSeen, requestId, attempt, msg.sender);
         }
@@ -117,8 +115,8 @@ contract DAIOCommitRevealManager is CommitReveal {
     function commitAudit(uint256 requestId, bytes32 resultHash, uint256 seed, uint256[4][] calldata targetProofs) external {
         require(core != address(0), "DAIOCommitRevealManager: core unset");
         if (IDAIOCommitSink(core).syncRequest(requestId) != AUDIT_COMMIT) return;
-        (,,,, uint256 attempt,,,,) = IDAIOCommitSink(core).getRequestLifecycle(requestId);
-        commit_hashed(resultHash, seed, IDAIOCommitSink(core).auditCommitRound(requestId));
+        (,,,, uint256 attempt,, uint256 auditEpoch,,) = IDAIOCommitSink(core).getRequestLifecycle(requestId);
+        commit_hashed(resultHash, seed, (requestId * 1_000_000) + (auditEpoch * 2) + 1);
         if (IDAIOCommitSink(core).submitAuditCommitFor(msg.sender, requestId, targetProofs)) {
             _recordParticipant(_auditParticipants, _auditParticipantSeen, requestId, attempt, msg.sender);
         }
