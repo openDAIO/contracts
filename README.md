@@ -49,15 +49,15 @@ USDAIO/ETH pool: `1 ETH = 100000 USDAIO`, seeded with about `0.1 ETH <> 10000 US
 | Base request fee | `100 USDAIO` |
 | `maxActiveRequests` | `2` |
 | Expected reviewer count | `5` |
-| Review election difficulty | `8000 / 10000` |
+| Review election difficulty | `10000 / 10000` |
 | Audit election difficulty | `10000 / 10000` |
 | Fast timeout per phase | `10 minutes` |
 | Standard timeout per phase | `30 minutes` |
 | Critical timeout per phase | `1 hour` |
-| Fast quorum | review `3/3`, audit `3/3` |
-| Standard quorum | review `3/3`, audit `3/3` |
-| Critical quorum | review `3/3`, audit `3/3` |
-| Fast audit target limit | `2` |
+| Fast quorum | review `4/4`, audit `4/4` |
+| Standard quorum | review `4/4`, audit `4/4` |
+| Critical quorum | review `4/4`, audit `4/4` |
+| Fast audit target limit | `3` |
 | Standard audit target limit | `3` |
 | Critical audit target limit | `4` |
 
@@ -123,7 +123,6 @@ The Sepolia deployment was tested through Hardhat forks.
 | Test | Result | Notes |
 | --- | --- | --- |
 | Compile with `OPTIMIZER_RUNS=10` | Passed | `DAIOCore` runtime bytecode: `24535 bytes`. |
-| Full default Hardhat suite | `32 passing`, `3 pending` | Pending tests are opt-in fork suites. |
+| Full default Hardhat suite | `33 passing`, `3 pending` | Pending tests are opt-in fork suites. |
 | Deployed-address Sepolia fork E2E | `2 passing` | Verified deployed wiring and ran request -> review -> audit -> round ledger -> accounting finalization on a local fork. |
 | Official Sepolia integration fork E2E | `1 passing` | Publicnode lacked historical state for this test; dRPC succeeded. |
-

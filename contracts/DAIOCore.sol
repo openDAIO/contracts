@@ -540,21 +540,24 @@ contract DAIOCore {
         bytes32 commitHash = commitReveal.saved_commits(_reviewCommitRound(requestId), reviewer);
         if (commitHash == bytes32(0)) revert BadCommitment();
 
-        (bool vrfOk, bytes32 randomness) = _tryVrfRandomness(requestId, REVIEW_SORTITION, request_.committeeEpoch, reviewer, address(0), vrfProof);
-        if (!vrfOk) {
-            _markProtocolFault(requestId, reviewer, "rv", request_.config.protocolFaultSlashBps);
-            return false;
-        }
-        if (!_passesSortition(REVIEW_SORTITION, requestId, reviewer, address(0), randomness, request_.config.reviewElectionDifficulty)) {
-            _markProtocolFault(requestId, reviewer, "rs", request_.config.protocolFaultSlashBps);
-            return false;
+        if (request_.config.reviewElectionDifficulty < SCALE) {
+            (bool vrfOk, bytes32 value) =
+                _tryVrfRandomness(requestId, REVIEW_SORTITION, request_.committeeEpoch, reviewer, address(0), vrfProof);
+            if (!vrfOk) {
+                _markProtocolFault(requestId, reviewer, "rv", request_.config.protocolFaultSlashBps);
+                return false;
+            }
+            uint256 sortitionScore = uint256(keccak256(abi.encode(REVIEW_SORTITION, requestId, reviewer, address(0), value))) % SCALE;
+            if (sortitionScore >= request_.config.reviewElectionDifficulty) {
+                _markProtocolFault(requestId, reviewer, "rs", request_.config.protocolFaultSlashBps);
+                return false;
+            }
         }
 
         ReviewSubmission storage submission = reviewSubmissions[requestId][reviewer];
         if (submission.committed) revert AlreadySubmitted();
 
         submission.commitHash = commitHash;
-        submission.sortitionRandomness = randomness;
         submission.committed = true;
         reviewerRegistry.lockStake(reviewer, requestId);
 
@@ -631,9 +634,11 @@ contract DAIOCore {
 
         address[] storage revealedReviewers = _revealedReviewers[requestId];
         uint256 expectedProofs = revealedReviewers.length > 0 ? revealedReviewers.length - 1 : 0;
-        if (targetProofs.length != expectedProofs) revert InvalidAuditTarget();
-
-        if (address(assignmentManager) == address(0)) revert InvalidAddress();
+        if (request_.config.auditElectionDifficulty >= SCALE) {
+            if (targetProofs.length != 0) revert InvalidAuditTarget();
+        } else if (targetProofs.length != expectedProofs) {
+            revert InvalidAuditTarget();
+        }
         uint256[2] memory publicKey = reviewerRegistry.vrfPublicKey(auditor);
         (bool assignmentOk, address[] memory canonicalTargets) = assignmentManager.verifiedCanonicalAuditTargets(
             address(vrfCoordinator),
@@ -1349,27 +1354,6 @@ contract DAIOCore {
             if (values[i] == target) return true;
         }
         return false;
-    }
-
-    function _sortitionScore(
-        bytes32 phase,
-        uint256 requestId,
-        address participant,
-        address subject,
-        bytes32 randomness
-    ) internal pure returns (uint256) {
-        return uint256(keccak256(abi.encode(phase, requestId, participant, subject, randomness))) % SCALE;
-    }
-
-    function _passesSortition(
-        bytes32 phase,
-        uint256 requestId,
-        address participant,
-        address subject,
-        bytes32 randomness,
-        uint256 difficulty
-    ) internal pure returns (bool) {
-        return _sortitionScore(phase, requestId, participant, subject, randomness) < difficulty;
     }
 
     function _reviewerIndex(address[] memory reviewers_, address target) internal pure returns (uint256) {

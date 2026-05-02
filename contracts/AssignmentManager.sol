@@ -34,6 +34,11 @@ contract AssignmentManager {
         uint256 difficulty,
         uint256 limit
     ) external view returns (bool ok, address[] memory selectedTargets) {
+        if (difficulty >= SCALE) {
+            selectedTargets = _fullAuditTargets(revealedReviewers, auditor, limit);
+            return (true, selectedTargets);
+        }
+
         address[] memory candidates = new address[](revealedReviewers.length);
         uint256[] memory scores = new uint256[](revealedReviewers.length);
         uint256 candidateCount;
@@ -96,6 +101,26 @@ contract AssignmentManager {
             }
             addresses_[j] = keyAddress;
             values[j] = keyValue;
+        }
+    }
+
+    function _fullAuditTargets(address[] calldata revealedReviewers, address auditor, uint256 limit)
+        internal
+        pure
+        returns (address[] memory selectedTargets)
+    {
+        uint256 selectedCount;
+        for (uint256 i = 0; i < revealedReviewers.length && selectedCount < limit; i++) {
+            if (revealedReviewers[i] != auditor) selectedCount++;
+        }
+
+        selectedTargets = new address[](selectedCount);
+        uint256 out;
+        for (uint256 i = 0; i < revealedReviewers.length && out < selectedCount; i++) {
+            address target = revealedReviewers[i];
+            if (target == auditor) continue;
+            selectedTargets[out] = target;
+            out++;
         }
     }
 }

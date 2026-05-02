@@ -760,6 +760,95 @@ describe("DAIOCore", function () {
     expect(await reviewerRegistry.requestLockedStake(requestId, reviewers[3].address)).to.equal(0n);
   });
 
+  it("allows full-sortition review and audit commits without VRF proofs", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, core } = fixture;
+    await core.setTierConfig(
+      FAST,
+      {
+        ...tierConfig({
+          reviewCommitQuorum: 4,
+          reviewRevealQuorum: 4,
+          auditCommitQuorum: 4,
+          auditRevealQuorum: 4,
+          auditTargetLimit: 3,
+          minIncomingAudit: 1,
+          auditCoverageQuorum: 7000,
+          contributionThreshold: 1000,
+          reviewEpochSize: 25,
+          auditEpochSize: 25,
+          finalityFactor: 2,
+          maxRetries: 0,
+          protocolFaultSlashBps: 500,
+          missedRevealSlashBps: 100,
+          semanticSlashBps: 200,
+          cooldownBlocks: 100,
+          reviewCommitTimeout: 30 * 60,
+          reviewRevealTimeout: 30 * 60,
+          auditCommitTimeout: 30 * 60,
+          auditRevealTimeout: 30 * 60
+        }),
+        reviewElectionDifficulty: 10000,
+        auditElectionDifficulty: 10000
+      }
+    );
+
+    const requestId = await createRequest(paymentRouter, requester, FAST, 0n, "full-sortition");
+    await core.startNextRequest();
+
+    const reviewers = fixture.reviewers.slice(0, 4);
+    const emptyReviewProof = [0n, 0n, 0n, 0n];
+    const reviews = [];
+    for (let i = 0; i < reviewers.length; i++) {
+      const review = await buildReviewCommit(
+        commitReveal,
+        requestId,
+        reviewers[i],
+        7000 + i * 100,
+        `ipfs://full-sortition-${i}`,
+        `full-sortition-${i}`
+      );
+      reviews.push(review);
+      await commitReview(commitReveal, reviewers[i], requestId, review, emptyReviewProof);
+    }
+
+    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal(reviewers.map((reviewer) => reviewer.address));
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(REVIEW_REVEAL);
+
+    for (let i = 0; i < reviewers.length; i++) {
+      await commitReveal
+        .connect(reviewers[i])
+        .revealReview(requestId, reviews[i].proposalScore, reviews[i].reportHash, reviews[i].reportURI, reviews[i].seed);
+    }
+
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(AUDIT_COMMIT);
+
+    const audits = [];
+    for (let i = 0; i < reviewers.length; i++) {
+      const targets = reviewers.filter((_, j) => j !== i);
+      const audit = await buildAuditCommit(
+        commitReveal,
+        requestId,
+        reviewers[i],
+        targets,
+        targets.map((_, j) => 8000 - j * 100),
+        `full-sortition-audit-${i}`
+      );
+      audits.push(audit);
+      await commitReveal.connect(reviewers[i]).commitAudit(requestId, audit.resultHash, audit.seed, []);
+    }
+
+    expect(await commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal(reviewers.map((reviewer) => reviewer.address));
+
+    for (let i = 0; i < reviewers.length; i++) {
+      await commitReveal.connect(reviewers[i]).revealAudit(requestId, audits[i].targets, audits[i].scores, audits[i].seed);
+    }
+
+    const lifecycle = await core.getRequestLifecycle(requestId);
+    expect(lifecycle.status).to.equal(FINALIZED);
+    expect(lifecycle.lowConfidence).to.equal(false);
+  });
+
   it("limits concurrently active requests to two", async function () {
     const { requester, paymentRouter, core } = await deployFixture(2);
 

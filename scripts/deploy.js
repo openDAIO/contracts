@@ -107,7 +107,7 @@ function config({
   auditRevealTimeout
 }) {
   return {
-    reviewElectionDifficulty: 8000,
+    reviewElectionDifficulty: 10000,
     auditElectionDifficulty: 10000,
     reviewCommitQuorum,
     reviewRevealQuorum,
@@ -147,11 +147,11 @@ async function configureTiers(core) {
   await confirm(core.setTierConfig(
     0,
     config({
-      reviewCommitQuorum: 3,
-      reviewRevealQuorum: 3,
-      auditCommitQuorum: 3,
-      auditRevealQuorum: 3,
-      auditTargetLimit: 2,
+      reviewCommitQuorum: 4,
+      reviewRevealQuorum: 4,
+      auditCommitQuorum: 4,
+      auditRevealQuorum: 4,
+      auditTargetLimit: 3,
       minIncomingAudit: 1,
       auditCoverageQuorum: 7000,
       contributionThreshold: 1000,
@@ -166,10 +166,10 @@ async function configureTiers(core) {
   await confirm(core.setTierConfig(
     1,
     config({
-      reviewCommitQuorum: 3,
-      reviewRevealQuorum: 3,
-      auditCommitQuorum: 3,
-      auditRevealQuorum: 3,
+      reviewCommitQuorum: 4,
+      reviewRevealQuorum: 4,
+      auditCommitQuorum: 4,
+      auditRevealQuorum: 4,
       auditTargetLimit: 3,
       minIncomingAudit: 2,
       auditCoverageQuorum: 8000,
@@ -185,10 +185,10 @@ async function configureTiers(core) {
   await confirm(core.setTierConfig(
     2,
     config({
-      reviewCommitQuorum: 3,
-      reviewRevealQuorum: 3,
-      auditCommitQuorum: 3,
-      auditRevealQuorum: 3,
+      reviewCommitQuorum: 4,
+      reviewRevealQuorum: 4,
+      auditCommitQuorum: 4,
+      auditRevealQuorum: 4,
       auditTargetLimit: 4,
       minIncomingAudit: 3,
       auditCoverageQuorum: 9000,

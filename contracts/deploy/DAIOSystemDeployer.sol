@@ -319,7 +319,7 @@ contract DAIOSystemDeployer {
             deployed.reputationLedger
         );
         IDAIOCoreDeployerTarget(deployed.core).setRoundLedger(deployed.roundLedger);
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(2, 1, 7000, 1000, 25, 25, 2, 0, 100, 10 minutes));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(3, 1, 7000, 1000, 25, 25, 2, 0, 100, 10 minutes));
         IDAIOCoreDeployerTarget(deployed.core).setTierConfig(1, _tierConfig(3, 2, 8000, 1500, 50, 50, 3, 1, 300, 30 minutes));
         IDAIOCoreDeployerTarget(deployed.core).setTierConfig(2, _tierConfig(4, 3, 9000, 2000, 100, 100, 5, 2, 900, 1 hours));
         IDAIOCoreDeployerTarget(deployed.core).setPaymentRouter(deployed.paymentRouter);
@@ -385,12 +385,12 @@ contract DAIOSystemDeployer {
         uint32 timeout
     ) internal pure returns (IDAIOCoreDeployerTarget.RequestConfig memory config) {
         config = IDAIOCoreDeployerTarget.RequestConfig({
-            reviewElectionDifficulty: 8000,
+            reviewElectionDifficulty: 10000,
             auditElectionDifficulty: 10000,
-            reviewCommitQuorum: 3,
-            reviewRevealQuorum: 3,
-            auditCommitQuorum: 3,
-            auditRevealQuorum: 3,
+            reviewCommitQuorum: 4,
+            reviewRevealQuorum: 4,
+            auditCommitQuorum: 4,
+            auditRevealQuorum: 4,
             auditTargetLimit: auditTargetLimit,
             minIncomingAudit: minIncomingAudit,
             auditCoverageQuorum: auditCoverageQuorum,
