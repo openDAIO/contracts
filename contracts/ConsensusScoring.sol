@@ -89,7 +89,12 @@ contract ConsensusScoring {
             if (maxMedian > 0) output.normalizedQuality[i] = (output.medians[i] * SCALE) / maxMedian;
             if (maxReliability > 0) output.normalizedReliability[i] = (output.rawReliability[i] * SCALE) / maxReliability;
 
-            output.contributions[i] = _min(output.normalizedQuality[i], output.normalizedReliability[i]);
+            // No incoming audit (auditors timed out): credit own audit reliability so effort is rewarded.
+            if (output.incomingCounts[i] == 0) {
+                output.contributions[i] = output.normalizedReliability[i];
+            } else {
+                output.contributions[i] = _min(output.normalizedQuality[i], output.normalizedReliability[i]);
+            }
             if (output.contributions[i] >= input.contributionThreshold) {
                 output.weights[i] = output.contributions[i];
                 output.totalContribution += output.contributions[i];

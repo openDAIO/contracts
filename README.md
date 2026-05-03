@@ -21,7 +21,7 @@ Finalized at block: `10779946`
 | `StakeVault` | `0xcD72B9D839Bc4058774AA16a4139339fA15BEc3e` | Escrows request fees and reviewer stakes. Pays rewards, refunds requesters, and applies slashes. |
 | `ReviewerRegistry` | `0x29CC861e715DeAC7D7C83A691EDf682D5c88dd5F` | Reviewer registration, stake accounting, eligibility checks, optional ENS/ERC-8004 checks, cooldowns, and fault tracking. |
 | `AssignmentManager` | `0x838b8aeDd90e231e8355eFb186494671bf9ff16C` | Full-audit assignment helper. |
-| `ConsensusScoring` | `0xEf348E9658087F7F459dE35207EF02bEb6923aaE` | Audit-backed consensus scoring module. |
+| `ConsensusScoring` | `0xe271d90C72D9a8D931f337C144C6C4e204F994ed` | Audit-backed consensus scoring module. Previous deployment: `0xEf348E9658087F7F459dE35207EF02bEb6923aaE`. |
 | `Settlement` | `0x6026EAff802C542e0530F234dbCB1738CAb2b6f1` | Computes reviewer reward and slash outcomes. |
 | `ReputationLedger` | `0x6099D8C70B4F0F43BdC8b8D1C5Aa58C1FFfab265` | Internal DAIO reputation source used by final weighting. |
 | `DAIORoundLedger` | `0xC02ec80De42917A25f279BF1c715c59459C1CD86` | Durable round score and accounting history. |
@@ -109,7 +109,7 @@ DAIO stores live state plus durable snapshots by request, attempt, round, and re
 | Round | Name | Purpose |
 | --- | --- | --- |
 | `0` | Review | Uses revealed proposal scores. Request score is the median review score. |
-| `1` | AuditConsensus | Uses audit-backed consensus scoring. Reviewer weights come from consensus contribution/reliability. |
+| `1` | AuditConsensus | Uses audit-backed consensus scoring. Reviewer weights come from consensus contribution/reliability. When a reviewer received no incoming audit (auditors timed out), their weight falls back to their own audit reliability so honest effort is still rewarded. |
 | `2` | ReputationFinal | Applies internal reputation weights from `ReputationLedger` and records final rewards/slashes. |
 
 Important view surfaces include:
@@ -185,7 +185,7 @@ Useful commands:
 | Check | Result | Notes |
 | --- | --- | --- |
 | Compile | Passed | `npx hardhat compile` |
-| Full default Hardhat suite | `40 passing`, `3 pending` | Pending suites are opt-in fork tests. |
+| Full default Hardhat suite | `43 passing`, `3 pending` | Pending suites are opt-in fork tests. |
 | Sepolia finalize | Passed | Confirmed `DAIOCore` points to the current `PaymentRouter` and hook/router settings are complete. |
 | Sepolia setup | Passed | Registered 5 `.env` agents, funded requester/relayer/agents, minted/approved USDAIO, and staked reviewers. |
 | Sepolia setup verification | Passed | `npm run verify:sepolia` confirmed addresses, tier settings, hook routing, reviewer enumeration, stakes, and allowances. |

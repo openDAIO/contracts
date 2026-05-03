@@ -410,11 +410,19 @@ d_norm[a] = d[a] / max(d)
 
 ### 9.4 Final Contribution
 
-The final contribution score combines report quality and audit reliability:
+The final contribution score combines report quality and audit reliability. When the reviewer received at least one incoming audit, both signals apply:
 
 ```text
-p[k] = min(m_norm[k], d_norm[k])
+p[k] = min(m_norm[k], d_norm[k])     if incomingCount[k] > 0
 ```
+
+When no audit landed on the reviewer's report (for example, every assigned auditor timed out), report quality cannot be measured and falls back to zero. To avoid penalizing a reviewer for someone else's missed audit, the contribution is taken from audit reliability alone:
+
+```text
+p[k] = d_norm[k]                     if incomingCount[k] == 0
+```
+
+A reviewer who neither received audits nor performed any audit work still has `d_norm[k] == 0`, so `p[k] == 0` and they earn no weight. Effort is what carries weight, not luck of incoming coverage.
 
 `p[k]` drives Round 1 proposal-score weighting, long-term reputation inputs, and repeated-fault detection. Rewards use the Round 2 final weight derived from `p[k]` and the reviewer's long-term reputation score.
 
