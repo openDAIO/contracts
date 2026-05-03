@@ -435,6 +435,10 @@ async function main() {
   const roundLedger = await DAIORoundLedger.deploy();
   await roundLedger.waitForDeployment();
 
+  const DAIOInfoReader = await ethers.getContractFactory("DAIOInfoReader");
+  const infoReader = await DAIOInfoReader.deploy(await core.getAddress());
+  await infoReader.waitForDeployment();
+
   await confirm(core.setModules(
     await stakeVault.getAddress(),
     await reviewerRegistry.getAddress(),
@@ -557,6 +561,7 @@ async function main() {
   console.log("FRAINVRFVerifier:", await vrfVerifier.getAddress());
   console.log("DAIOVRFCoordinator:", await vrfCoordinator.getAddress());
   console.log("DAIOCore:", await core.getAddress());
+  console.log("DAIOInfoReader:", await infoReader.getAddress());
   console.log("DAIORoundLedger:", await roundLedger.getAddress());
   console.log("AcceptedTokenRegistry:", await acceptedTokenRegistry.getAddress());
   if (ensVerifier) console.log("ENSVerifier:", await ensVerifier.getAddress());

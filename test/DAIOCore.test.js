@@ -483,6 +483,15 @@ describe("DAIOCore", function () {
     return { aliceAudit, bobAudit };
   }
 
+  it("enumerates every registered reviewer in registration order", async function () {
+    const { reviewerRegistry, reviewers } = await deployFixture();
+    const expected = reviewers.map((reviewer) => reviewer.address);
+
+    expect(await reviewerRegistry.reviewerCount()).to.equal(BigInt(expected.length));
+    expect(await reviewerRegistry.reviewerAt(0)).to.equal(expected[0]);
+    expect(await reviewerRegistry.getReviewers()).to.deep.equal(expected);
+  });
+
   it("runs the post-audit scoring and settlement path", async function () {
     const fixture = await deployFixture();
     const { requester, usdaio, stakeVault, commitReveal, paymentRouter, vrfProof, core, reputationLedger, roundLedger } = fixture;

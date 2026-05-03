@@ -58,6 +58,7 @@ contract ReviewerRegistry {
     uint256 public minProtocolCompliance = 7_000;
 
     mapping(address reviewer => Reviewer data) internal reviewers;
+    address[] internal reviewerAddresses;
     mapping(address reviewer => uint256 amount) public lockedStake;
     mapping(uint256 requestId => mapping(address reviewer => uint256 amount)) public requestLockedStake;
 
@@ -68,6 +69,7 @@ contract ReviewerRegistry {
     event ReputationGateUpdated(address indexed reputationLedger, uint256 minSamples, uint256 minFinalContribution, uint256 minProtocolCompliance);
     event ReviewerRegistered(address indexed reviewer, uint256 indexed agentId, bytes32 indexed ensNode, uint256 stake, uint256 domainMask);
     event ReviewerSlashed(address indexed reviewer, uint256 amount, string reason);
+    event StakeAdded(address indexed reviewer, uint256 amount, uint256 newStake);
     event StakeLocked(address indexed reviewer, uint256 indexed requestId, uint256 amount);
     event StakeUnlocked(address indexed reviewer, uint256 indexed requestId, uint256 amount);
 
@@ -150,10 +152,12 @@ contract ReviewerRegistry {
         }
 
         Reviewer storage reviewer = reviewers[msg.sender];
+        bool wasRegistered = reviewer.registered;
         uint256 newStake = reviewer.stake + stakeAmount;
         if (newStake < minStake) revert InvalidAmount();
         stakeVault.stakeFor(msg.sender, stakeAmount);
 
+        if (!wasRegistered) reviewerAddresses.push(msg.sender);
         reviewer.registered = true;
         reviewer.active = true;
         reviewer.ensNode = ensNode;
@@ -165,6 +169,17 @@ contract ReviewerRegistry {
         reviewer.stake = newStake;
 
         emit ReviewerRegistered(msg.sender, agentId_, ensNode, newStake, domainMask);
+    }
+
+    function addStake(uint256 amount) external {
+        Reviewer storage reviewer = reviewers[msg.sender];
+        if (!reviewer.registered || amount == 0) revert InvalidAmount();
+
+        uint256 newStake = reviewer.stake + amount;
+        stakeVault.stakeFor(msg.sender, amount);
+        reviewer.stake = newStake;
+
+        emit StakeAdded(msg.sender, amount, newStake);
     }
 
     function setReviewerStatus(address reviewer, bool active, bool suspended) external onlyOwner {
@@ -201,6 +216,18 @@ contract ReviewerRegistry {
 
     function agentId(address reviewerAddress) external view returns (uint256) {
         return reviewers[reviewerAddress].agentId;
+    }
+
+    function reviewerCount() external view returns (uint256) {
+        return reviewerAddresses.length;
+    }
+
+    function reviewerAt(uint256 index) external view returns (address) {
+        return reviewerAddresses[index];
+    }
+
+    function getReviewers() external view returns (address[] memory) {
+        return reviewerAddresses;
     }
 
     function markCompleted(address reviewerAddress) external onlyCore {

@@ -120,7 +120,8 @@ async function buildPaymentCode() {
 }
 
 async function main() {
-  const [deployerAccount, treasury, requester] = await ethers.getSigners();
+  const [deployerAccount, treasurySigner, requester] = await ethers.getSigners();
+  const treasury = treasurySigner || deployerAccount;
   const isLocal = network.name === "hardhat" || network.name === "localhost";
   const isSepolia = network.config.chainId === SEPOLIA.chainId;
   const deployEnsVerifier = envBool("ENABLE_ENS_VERIFIER", true);
@@ -166,7 +167,13 @@ async function main() {
     await runStage(systemDeployer, "deployLocalMocks", systemDeployer.deployLocalMocks(await buildLocalMockCode()), deployed, gasReport);
   }
   await runStage(systemDeployer, "deployModules", systemDeployer.deployModules(deployerAccount.address, await buildModuleCode()), deployed, gasReport);
-  await runStage(systemDeployer, "deployCore", systemDeployer.deployCore(treasury.address, 2, await buildCoreCode()), deployed, gasReport);
+  await runStage(
+    systemDeployer,
+    "deployCore",
+    systemDeployer.deployCore(treasury.address, 2, await buildCoreCode(), { gasLimit: 12_500_000 }),
+    deployed,
+    gasReport
+  );
   await runStage(
     systemDeployer,
     "deployPaymentAndIdentity",
@@ -201,6 +208,8 @@ async function main() {
   await runStage(systemDeployer, "wireAndTransfer", systemDeployer.wireAndTransfer(config), deployed, gasReport);
 
   const core = await ethers.getContractAt("DAIOCore", requireAddress(deployed, "DAIOCore"));
+  const infoReader = await deployContract("DAIOInfoReader", await core.getAddress());
+  deployed.DAIOInfoReader = await infoReader.getAddress();
   const paymentRouter = await ethers.getContractAt("PaymentRouter", requireAddress(deployed, "PaymentRouter"));
   const usdaio = await ethers.getContractAt("USDAIOToken", requireAddress(deployed, "USDAIO"));
   const reviewerRegistry = await ethers.getContractAt("ReviewerRegistry", requireAddress(deployed, "ReviewerRegistry"));
@@ -209,6 +218,7 @@ async function main() {
   const swapAdapter = await ethers.getContractAt("UniswapV4SwapAdapter", requireAddress(deployed, "UniswapV4SwapAdapter"));
 
   if ((await core.maxActiveRequests()) !== 2n) throw new Error("Unexpected maxActiveRequests");
+  if ((await infoReader.core()) !== await core.getAddress()) throw new Error("InfoReader core not wired");
   if ((await core.stakeVault()) !== await stakeVault.getAddress()) throw new Error("Core stakeVault not wired");
   if ((await paymentRouter.core()) !== await core.getAddress()) throw new Error("PaymentRouter core not wired");
   if ((await reviewerRegistry.core()) !== await core.getAddress()) throw new Error("ReviewerRegistry core not wired");

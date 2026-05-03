@@ -359,7 +359,7 @@ contract DAIOCore {
     error AlreadySubmitted();
     error BadCommitment();
     error BadConfig();
-    error BadStatus(RequestStatus expected, RequestStatus actual);
+    error BadStatus();
     error IneligibleReviewer();
     error InvalidAddress();
     error InvalidAmount();
@@ -865,6 +865,12 @@ contract DAIOCore {
         );
     }
 
+    function extsload(bytes32 slot) external view returns (bytes32 value) {
+        assembly {
+            value := sload(slot)
+        }
+    }
+
     function _finalize(uint256 requestId) internal {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditReveal);
         if (address(consensusScoring) == address(0) || address(settlement) == address(0) || address(reputationLedger) == address(0)) {
@@ -1295,7 +1301,7 @@ contract DAIOCore {
 
     function _requireStatus(uint256 requestId, RequestStatus status) internal view returns (Request storage request_) {
         request_ = _requireRequest(requestId);
-        if (request_.status != status) revert BadStatus(status, request_.status);
+        if (request_.status != status) revert BadStatus();
     }
 
     function _roundLedger() internal view returns (IDAIORoundLedgerLike ledger) {

@@ -7,7 +7,7 @@ const BN = require("bn.js");
 const RUN_DEPLOYED_FORK = process.env.RUN_SEPOLIA_DEPLOYED_FORK === "true";
 const describeDeployedFork = RUN_DEPLOYED_FORK ? describe : describe.skip;
 const FORK_URL = process.env.SEPOLIA_RPC_URL || process.env.HARDHAT_FORK_URL || "https://sepolia.drpc.org";
-const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10769790");
+const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10778505");
 
 const DEPLOYER = "0x2f149CaA0e931e13f6F32bd3E46eFc6e96bcC36A";
 const DOMAIN_RESEARCH = 1;
@@ -63,25 +63,25 @@ const SEPOLIA = {
 };
 
 const DEPLOYED = {
-  usdaio: "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
-  stakeVault: "0x263091C8A7B28E5f0F71C3AE8F60823B0DcC8504",
-  reviewerRegistry: "0xE30531Df811b06d7D4eA6a799810112aE75635BE",
-  assignmentManager: "0x96E8D837978632D75Eb8eA242afD25B7eBf83FC8",
-  consensusScoring: "0xDd9dEd9e8a6b68cD1759299ce8EcD3b87577FdfA",
-  settlement: "0xB395CBBE231974167bB3d9B7e212C594f6932523",
-  reputationLedger: "0x9685500168e6C5D60f3f060A49DE6F57F9AC1E9A",
-  commitReveal: "0x29c3E89D3D3e198F8e62ead7A39F24375EC0A647",
-  priorityQueue: "0x8BDEA183c664E11c39Af5eF7948CE8cb46751117",
-  vrfVerifier: "0xdf50FA950b5Afd2D551D0D5CCbA88b8aE77c5786",
-  vrfCoordinator: "0x4040e3387115b81216301858168C6854038E5D28",
-  core: "0xb61D8921B8E310D06dD38C913e43928780830B56",
-  roundLedger: "0x6085A3371A420e5397E7edb34Dde0373BA5d00aE",
-  erc8004Adapter: "0x4CD72D5817b654A76e4000F1f84dC1A128Ac3649",
-  acceptedTokenRegistry: "0x98d00bc8Ddde42dfE4F3BA7fbAd23d6880c0c19d",
-  swapAdapter: "0xDa724BA5Eba473De3dc7dd38A686003637d694B3",
-  paymentRouter: "0xe90dd5A9C6962b6308d8a46422eF8bCE32D7E063",
-  ensVerifier: "0xEf175ad939f9bDDe284d41b779ccc13b1377530f",
-  autoConvertHook: "0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040"
+  usdaio: "0x3bB1A142b5abE17e5B2e577fa83b5247b6532606",
+  stakeVault: "0x9b790bf0bB552716dc8d3234DFf3e4a3A5a6a8F8",
+  reviewerRegistry: "0x7e7Ea105168dd18293dC128eA43b3d1BE0000686",
+  assignmentManager: "0xA77B2A24474F839616D9a1696D53861C8029E306",
+  consensusScoring: "0xfEa92280128c4dc6d658F1D18b38019336ae452d",
+  settlement: "0xde10633fEa33c0f56919d9eFa632294Bde6AA5A1",
+  reputationLedger: "0xBe13def9be39A5235FEDAa1571296f3C384258Be",
+  commitReveal: "0xBd2f6A66f4AD5162aE3eb564119C8325A660CD02",
+  priorityQueue: "0x4e7179a751F09e643f27CAD157BF40d5e9915c79",
+  vrfVerifier: "0x5E43cE1E1dE9a7C041463C189aA5c2dC975C10df",
+  vrfCoordinator: "0x97dD41B2950C203bA75F0FD9189144047EF0B374",
+  core: "0x41D1570eA26561C381FC94e61d1381826F45cD4d",
+  roundLedger: "0x30D6A783716bC30aAF04cf1022d31627D00c6f9D",
+  erc8004Adapter: "0xF89d23b89f3c4C514b90073A36cc9618E127c0eA",
+  acceptedTokenRegistry: "0x449c80B3E923DB9CB8E2E592Ba3Ec5E4a19a49a7",
+  swapAdapter: "0x42dfA56F457aAcc6243931534C08E99DEA4f6866",
+  paymentRouter: "0x28e88241B4E887619E21869fDb835efD10B4bb80",
+  ensVerifier: "0x87B674Ec26F8F8001E2FCfB25a47a93746760cc1",
+  autoConvertHook: "0xc0f32B14f0529158dDceD48Bfd2558F0AB134040"
 };
 
 function sortitionScore(phase, requestId, participant, subject, randomness) {
@@ -323,11 +323,11 @@ async function review(commitReveal, requestId, reviewer, score, uri, label, vrfP
   return { score, reportHash, uri, seed };
 }
 
-async function audit(commitReveal, requestId, auditor, targets, scores, label, vrfProof) {
+async function audit(commitReveal, requestId, auditor, targets, scores, label, targetProofs = []) {
   const seed = BigInt(ethers.id(`${label}:deployed-audit`));
   const targetAddresses = targets.map((target) => target.address);
   const resultHash = await commitReveal.hashAuditReveal(requestId, auditor.address, targetAddresses, scores);
-  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, [vrfProof]);
+  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, targetProofs);
   return { targets: targetAddresses, scores, seed };
 }
 
@@ -414,6 +414,7 @@ describeDeployedFork("Sepolia deployed-address fork E2E", function () {
     latest = await contracts.paymentRouter.latestRequestState(requester.address);
     expect(latest.status).to.equal(REVIEW_COMMIT);
 
+    const reviewersBefore = await contracts.reviewerRegistry.getReviewers();
     for (const [index, reviewer] of [alice, bob].entries()) {
       const publicKey = index === 0 ? aliceVrfPublicKey : bobVrfPublicKey;
       await contracts.usdaio.connect(owner).mint(reviewer.address, stake);
@@ -422,6 +423,7 @@ describeDeployedFork("Sepolia deployed-address fork E2E", function () {
         .connect(reviewer)
         .registerReviewer(`${reviewer.address}.deployed.daio.eth`, ethers.keccak256(ethers.toUtf8Bytes(reviewer.address)), 10_001 + index, DOMAIN_RESEARCH, publicKey, stake);
     }
+    expect(await contracts.reviewerRegistry.getReviewers()).to.deep.equal([...reviewersBefore, alice.address, bob.address]);
 
     const lifecycleAfterStart = await contracts.core.getRequestLifecycle(requestId);
     const reviewPhaseStartedBlock = BigInt(startReceipt.blockNumber);
@@ -457,31 +459,11 @@ describeDeployedFork("Sepolia deployed-address fork E2E", function () {
     const bobRevealReceipt = await bobRevealTx.wait();
     const lifecycleAfterReview = await contracts.core.getRequestLifecycle(requestId);
     const auditPhaseStartedBlock = BigInt(bobRevealReceipt.blockNumber);
-    const aliceAuditProof = await proofForDeployedCoordinator(
-      contracts,
-      aliceVrfKey,
-      requestId,
-      AUDIT_SORTITION,
-      lifecycleAfterReview.auditEpoch,
-      alice,
-      bob,
-      auditPhaseStartedBlock,
-      finalityFactor
-    );
-    const bobAuditProof = await proofForDeployedCoordinator(
-      contracts,
-      bobVrfKey,
-      requestId,
-      AUDIT_SORTITION,
-      lifecycleAfterReview.auditEpoch,
-      bob,
-      alice,
-      auditPhaseStartedBlock,
-      finalityFactor
-    );
+    expect(auditPhaseStartedBlock).to.equal(BigInt(bobRevealReceipt.blockNumber));
+    expect(lifecycleAfterReview.auditEpoch).to.be.gt(0n);
 
-    const aliceAudit = await audit(contracts.commitReveal, requestId, alice, [bob], [7000], "alice", aliceAuditProof);
-    const bobAudit = await audit(contracts.commitReveal, requestId, bob, [alice], [9000], "bob", bobAuditProof);
+    const aliceAudit = await audit(contracts.commitReveal, requestId, alice, [bob], [7000], "alice");
+    const bobAudit = await audit(contracts.commitReveal, requestId, bob, [alice], [9000], "bob");
     expect(await contracts.commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
 
     await contracts.commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);

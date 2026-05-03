@@ -1,0 +1,41 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "deployedAtBlock": 10778422,
+  "configuredAtBlock": 10778427,
+  "recommendedForkBlock": 10778505,
+  "deployer": "0x2f149CaA0e931e13f6F32bd3E46eFc6e96bcC36A",
+  "contracts": {
+    "DAIOSystemDeployer": "0x9CD4E0ECA0AD9B55E406C3C40E66878202E043f4",
+    "USDAIO": "0x3bB1A142b5abE17e5B2e577fa83b5247b6532606",
+    "StakeVault": "0x9b790bf0bB552716dc8d3234DFf3e4a3A5a6a8F8",
+    "ReviewerRegistry": "0x7e7Ea105168dd18293dC128eA43b3d1BE0000686",
+    "AssignmentManager": "0xA77B2A24474F839616D9a1696D53861C8029E306",
+    "ConsensusScoring": "0xfEa92280128c4dc6d658F1D18b38019336ae452d",
+    "Settlement": "0xde10633fEa33c0f56919d9eFa632294Bde6AA5A1",
+    "ReputationLedger": "0xBe13def9be39A5235FEDAa1571296f3C384258Be",
+    "DAIOCommitRevealManager": "0xBd2f6A66f4AD5162aE3eb564119C8325A660CD02",
+    "DAIOPriorityQueue": "0x4e7179a751F09e643f27CAD157BF40d5e9915c79",
+    "FRAINVRFVerifier": "0x5E43cE1E1dE9a7C041463C189aA5c2dC975C10df",
+    "DAIOVRFCoordinator": "0x97dD41B2950C203bA75F0FD9189144047EF0B374",
+    "DAIOCore": "0x41D1570eA26561C381FC94e61d1381826F45cD4d",
+    "DAIORoundLedger": "0x30D6A783716bC30aAF04cf1022d31627D00c6f9D",
+    "AcceptedTokenRegistry": "0x449c80B3E923DB9CB8E2E592Ba3Ec5E4a19a49a7",
+    "UniswapV4SwapAdapter": "0x42dfA56F457aAcc6243931534C08E99DEA4f6866",
+    "PaymentRouter": "0x28e88241B4E887619E21869fDb835efD10B4bb80",
+    "ENSVerifier": "0x87B674Ec26F8F8001E2FCfB25a47a93746760cc1",
+    "ERC8004Adapter": "0xF89d23b89f3c4C514b90073A36cc9618E127c0eA",
+    "DAIOAutoConvertHook": "0xc0f32B14f0529158dDceD48Bfd2558F0AB134040",
+    "DAIOInfoReader": "0xeEAE0239073d99647c5b4199e02427b55183Ed5E"
+  },
+  "postDeployTransactions": {
+    "AcceptedTokenRegistry.setAcceptedToken(USDC,true,true)": "0x36cbb0784b590f54172119ee083e3261e7ba7df91148ba053bf2f139e2c19823",
+    "DAIOCore.setTierConfig(FAST)": "0x40d7a1e1a874681b73f60153ae2c344a3fa3d25683e31de6a022d003cbc98242",
+    "PaymentRouter.approveRequesterUSDAIO": "0x2127279ad4967d33d9bc3a855608ab8d6074a5c606c3324deb731fda3504e408",
+    "ReviewerRegistry.registerAgent1": "0x86ca2f15dea17622798516e4790e8bf30e12c94f336339f7632baaccaceb7f77",
+    "ReviewerRegistry.registerAgent2": "0x0b48648ced4833fec4cea7379757adc44f4e5650c0e4fea81256c79e9f0c5379",
+    "ReviewerRegistry.registerAgent3": "0xcd130858e27e1f186eac18f272e3b5a82a5591681f2a3a55331331c0a96a27ba",
+    "ReviewerRegistry.registerAgent4": "0xfea8a195dc9944c70daf6ec6d01dcc0f0c3c711a389e9e637a3e328282a9a3fb",
+    "ReviewerRegistry.registerAgent5": "0x4d6acd7aca2611f154293894b2e9a3a22aefac4333a21e2efc3f5c1b43d9fad5"
+  }
+}

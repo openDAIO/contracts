@@ -5,14 +5,14 @@ const { ec: EC } = require("elliptic");
 const BN = require("bn.js");
 
 const DEPLOYED = {
-  usdaio: "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
-  stakeVault: "0x263091C8A7B28E5f0F71C3AE8F60823B0DcC8504",
-  reviewerRegistry: "0xE30531Df811b06d7D4eA6a799810112aE75635BE",
-  commitReveal: "0x29c3E89D3D3e198F8e62ead7A39F24375EC0A647",
-  vrfCoordinator: "0x4040e3387115b81216301858168C6854038E5D28",
-  core: "0xb61D8921B8E310D06dD38C913e43928780830B56",
-  roundLedger: "0x6085A3371A420e5397E7edb34Dde0373BA5d00aE",
-  paymentRouter: "0xe90dd5A9C6962b6308d8a46422eF8bCE32D7E063"
+  usdaio: "0x3bB1A142b5abE17e5B2e577fa83b5247b6532606",
+  stakeVault: "0x9b790bf0bB552716dc8d3234DFf3e4a3A5a6a8F8",
+  reviewerRegistry: "0x7e7Ea105168dd18293dC128eA43b3d1BE0000686",
+  commitReveal: "0xBd2f6A66f4AD5162aE3eb564119C8325A660CD02",
+  vrfCoordinator: "0x97dD41B2950C203bA75F0FD9189144047EF0B374",
+  core: "0x41D1570eA26561C381FC94e61d1381826F45cD4d",
+  roundLedger: "0x30D6A783716bC30aAF04cf1022d31627D00c6f9D",
+  paymentRouter: "0x28e88241B4E887619E21869fDb835efD10B4bb80"
 };
 
 const DOMAIN_RESEARCH = 1;
@@ -330,19 +330,21 @@ async function runAttempt(env, premineBlocks) {
     const targets = reviewers.filter((target) => target.address !== auditor.address);
     auditor.auditTargets = targets;
     auditor.auditProofs = [];
-    for (const target of targets) {
-      const audit = await proofAndScore(
-        contracts,
-        auditor,
-        requestId,
-        AUDIT_SORTITION,
-        lifecycleAfterReview.auditEpoch,
-        target,
-        auditPhaseStartedBlock,
-        config.finalityFactor
-      );
-      if (audit.score >= config.auditDifficulty) throw new Error(`${auditor.label} failed audit sortition unexpectedly`);
-      auditor.auditProofs.push(audit.proof);
+    if (config.auditDifficulty < SCALE) {
+      for (const target of targets) {
+        const audit = await proofAndScore(
+          contracts,
+          auditor,
+          requestId,
+          AUDIT_SORTITION,
+          lifecycleAfterReview.auditEpoch,
+          target,
+          auditPhaseStartedBlock,
+          config.finalityFactor
+        );
+        if (audit.score >= config.auditDifficulty) throw new Error(`${auditor.label} failed audit sortition unexpectedly`);
+        auditor.auditProofs.push(audit.proof);
+      }
     }
   }
 

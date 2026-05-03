@@ -320,6 +320,51 @@ describe("PROPOSAL parity modules", function () {
     ).to.be.revertedWithCustomError(reviewerRegistry, "IneligibleReviewer");
   });
 
+  it("enumerates registered reviewers without duplicating re-registrations", async function () {
+    const { alice, bob, usdaio, stakeVault, reviewerRegistry, vrfPublicKey } = await deployCoreFixture();
+    const stake = ethers.parseEther("1000");
+
+    await usdaio.mint(alice.address, stake * 2n);
+    await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake * 2n);
+    await reviewerRegistry.connect(alice).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+    await reviewerRegistry.connect(alice).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+
+    await usdaio.mint(bob.address, stake);
+    await usdaio.connect(bob).approve(await stakeVault.getAddress(), stake);
+    await reviewerRegistry.connect(bob).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+
+    expect(await reviewerRegistry.reviewerCount()).to.equal(2n);
+    expect(await reviewerRegistry.reviewerAt(0)).to.equal(alice.address);
+    expect(await reviewerRegistry.reviewerAt(1)).to.equal(bob.address);
+    expect(await reviewerRegistry.getReviewers()).to.deep.equal([alice.address, bob.address]);
+  });
+
+  it("lets registered reviewers add stake without changing metadata", async function () {
+    const { alice, bob, usdaio, stakeVault, reviewerRegistry, vrfPublicKey } = await deployCoreFixture();
+    const stake = ethers.parseEther("1000");
+    const topUp = ethers.parseEther("250");
+    const agentId = 42;
+
+    await expect(reviewerRegistry.connect(bob).addStake(topUp)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
+
+    await usdaio.mint(alice.address, stake + topUp);
+    await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake + topUp);
+    await reviewerRegistry.connect(alice).registerReviewer("", ethers.ZeroHash, agentId, DOMAIN_RESEARCH, vrfPublicKey, stake);
+
+    await expect(reviewerRegistry.connect(alice).addStake(0)).to.be.revertedWithCustomError(reviewerRegistry, "InvalidAmount");
+    await expect(reviewerRegistry.connect(alice).addStake(topUp))
+      .to.emit(reviewerRegistry, "StakeAdded")
+      .withArgs(alice.address, topUp, stake + topUp);
+
+    const reviewer = await reviewerRegistry.getReviewer(alice.address);
+    expect(reviewer.registered).to.equal(true);
+    expect(reviewer.agentId_).to.equal(BigInt(agentId));
+    expect(reviewer.domainMask).to.equal(DOMAIN_RESEARCH);
+    expect(reviewer.stake).to.equal(stake + topUp);
+    expect(await reviewerRegistry.availableStake(alice.address)).to.equal(stake + topUp);
+    expect(await stakeVault.stakes(alice.address)).to.equal(stake + topUp);
+  });
+
   it("lets any account faucet-mint USDAIO on test deployments", async function () {
     const { bob, usdaio } = await deployCoreFixture();
     const amount = ethers.parseEther("12345");
@@ -411,6 +456,94 @@ describe("PROPOSAL parity modules", function () {
     expect(latest.status).to.equal(REVIEW_COMMIT);
     expect(latest.processing).to.equal(true);
     expect(latest.completed).to.equal(false);
+  });
+
+  it("exposes settings, progress, and submission details through DAIOInfoReader", async function () {
+    const { requester, alice, usdaio, stakeVault, reviewerRegistry, commitReveal, vrfPublicKey, vrfProof, core } =
+      await deployCoreFixture();
+    const { paymentRouter } = await deployPaymentFixture(usdaio, core);
+    const DAIOInfoReader = await ethers.getContractFactory("DAIOInfoReader");
+    const infoReader = await DAIOInfoReader.deploy(await core.getAddress());
+    await infoReader.waitForDeployment();
+
+    await core.setTierConfig(FAST, {
+      ...tierConfig(),
+      reviewElectionDifficulty: 10000,
+      auditElectionDifficulty: 10000,
+      reviewCommitQuorum: 1,
+      reviewRevealQuorum: 1,
+      auditCommitQuorum: 1,
+      auditRevealQuorum: 1
+    });
+
+    const stake = ethers.parseEther("1000");
+    await usdaio.mint(alice.address, stake);
+    await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake);
+    await reviewerRegistry.connect(alice).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+
+    const required = await core.baseRequestFee();
+    await usdaio.mint(requester.address, required);
+    await usdaio.connect(requester).approve(await paymentRouter.getAddress(), required);
+    await paymentRouter
+      .connect(requester)
+      .createRequestWithUSDAIO("ipfs://info-reader", ethers.id("info-reader"), ethers.id("rubric"), DOMAIN_RESEARCH, FAST, 0);
+
+    const overview = await infoReader.systemOverview();
+    expect(overview.paymentRouter).to.equal(await paymentRouter.getAddress());
+    expect(overview.stakeVault).to.equal(await stakeVault.getAddress());
+    expect(overview.requestCount).to.equal(1n);
+
+    const fastConfig = await infoReader.tierConfig(FAST);
+    expect(fastConfig.reviewCommitQuorum).to.equal(1n);
+    expect(fastConfig.auditRevealTimeout).to.equal(30n * 60n);
+
+    let requestInfo = await infoReader.requestInfo(1);
+    expect(requestInfo.requester).to.equal(requester.address);
+    expect(requestInfo.status).to.equal(QUEUED);
+    expect(requestInfo.feePaid).to.equal(required);
+    expect(requestInfo.rewardPool).to.equal((required * 9000n) / 10000n);
+
+    await core.startNextRequest();
+    let phase = await infoReader.requestPhase(1);
+    expect(phase.status).to.equal(REVIEW_COMMIT);
+    expect(phase.count).to.equal(0n);
+    expect(phase.quorum).to.equal(1n);
+    expect(phase.timeout).to.equal(30n * 60n);
+    expect(phase.processing).to.equal(true);
+    expect(phase.completed).to.equal(false);
+
+    const reportHash = ethers.id("alice-report");
+    const reportURI = "ipfs://alice-report";
+    const score = 8000;
+    const seed = 123n;
+    const resultHash = await commitReveal.hashReviewReveal(1, alice.address, score, reportHash, reportURI);
+    await commitReveal.connect(alice).commitReview(1, resultHash, seed, vrfProof);
+
+    let [reviewCommitters, revealedReviewers] = await infoReader.requestParticipants(1);
+    expect(reviewCommitters).to.deep.equal([alice.address]);
+    expect(revealedReviewers).to.deep.equal([]);
+
+    let submission = await infoReader.reviewSubmission(1, alice.address);
+    expect(submission.commitHash).to.equal(
+      ethers.solidityPackedKeccak256(["bytes32", "address", "uint256"], [resultHash, alice.address, seed])
+    );
+    expect(submission.committed).to.equal(true);
+    expect(submission.revealed).to.equal(false);
+
+    await commitReveal.connect(alice).revealReview(1, score, reportHash, reportURI, seed);
+
+    [reviewCommitters, revealedReviewers] = await infoReader.requestParticipants(1);
+    expect(reviewCommitters).to.deep.equal([alice.address]);
+    expect(revealedReviewers).to.deep.equal([alice.address]);
+
+    requestInfo = await infoReader.requestInfo(1);
+    expect(requestInfo.reviewCommitCount).to.equal(1n);
+    expect(requestInfo.reviewRevealCount).to.equal(1n);
+
+    submission = await infoReader.reviewSubmission(1, alice.address);
+    expect(submission.revealed).to.equal(true);
+    expect(submission.proposalScore).to.equal(BigInt(score));
+    expect(submission.reportHash).to.equal(reportHash);
   });
 
   it("lets a relayer submit a signed USDAIO request while preserving the requester", async function () {

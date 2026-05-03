@@ -298,7 +298,12 @@ describeFork("Sepolia fork E2E", function () {
     }
 
     const fixture = await deployForkFixture();
-    const { requester, commitReveal, paymentRouter, core, roundLedger, vrfProof } = fixture;
+    const { requester, reviewers, reviewerRegistry, commitReveal, paymentRouter, core, roundLedger, vrfProof } = fixture;
+    const registeredReviewers = reviewers.map((reviewer) => reviewer.address);
+    expect(await reviewerRegistry.reviewerCount()).to.equal(BigInt(registeredReviewers.length));
+    expect(await reviewerRegistry.reviewerAt(0)).to.equal(registeredReviewers[0]);
+    expect(await reviewerRegistry.getReviewers()).to.deep.equal(registeredReviewers);
+
     await paymentRouter
       .connect(requester)
       .createRequestWithUSDAIO("ipfs://fork-proposal", ethers.id("fork-proposal"), ethers.id("fork-rubric"), DOMAIN_RESEARCH, FAST, 0);
