@@ -1,6 +1,7 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const vrfData = require("../lib/vrf-solidity/test/data.json");
+const { deployCoreProxy } = require("./helpers/deployCoreProxy");
 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
@@ -129,15 +130,13 @@ describe("PROPOSAL parity modules", function () {
     const vrfCoordinator = await MockVRFCoordinator.deploy();
     await vrfCoordinator.waitForDeployment();
 
-    const DAIOCore = await ethers.getContractFactory("DAIOCore");
-    const core = await DAIOCore.deploy(
-      treasury.address,
-      await commitReveal.getAddress(),
-      await priorityQueue.getAddress(),
-      await vrfCoordinator.getAddress(),
-      2
-    );
-    await core.waitForDeployment();
+    const { core } = await deployCoreProxy({
+      treasury: treasury.address,
+      commitReveal: await commitReveal.getAddress(),
+      priorityQueue: await priorityQueue.getAddress(),
+      vrfCoordinator: await vrfCoordinator.getAddress(),
+      maxActiveRequests: 2
+    });
 
     const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
     const roundLedger = await DAIORoundLedger.deploy();

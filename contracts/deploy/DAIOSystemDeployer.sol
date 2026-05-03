@@ -29,6 +29,14 @@ interface IDAIOCoreDeployerTarget {
         uint32 auditRevealTimeout;
     }
 
+    function initialize(
+        address treasury,
+        address commitReveal,
+        address priorityQueue,
+        address vrfCoordinator,
+        uint256 maxActiveRequests
+    ) external;
+
     function setModules(
         address stakeVault,
         address reviewerRegistry,
@@ -134,6 +142,7 @@ contract DAIOSystemDeployer {
         bytes vrfVerifier;
         bytes vrfCoordinator;
         bytes core;
+        bytes coreProxy;
         bytes roundLedger;
     }
 
@@ -158,6 +167,7 @@ contract DAIOSystemDeployer {
         address priorityQueue;
         address vrfVerifier;
         address vrfCoordinator;
+        address coreImplementation;
         address core;
         address roundLedger;
         address acceptedTokenRegistry;
@@ -225,21 +235,30 @@ contract DAIOSystemDeployer {
         deployed.reputationLedger = _deploy("ReputationLedger", code.reputationLedger);
     }
 
-    function deployCore(address treasury, uint256 maxActiveRequests, CoreCode calldata code) external onlyOwner {
+    function deployCore(address treasury, uint256 maxActiveRequests, address proxyAdminOwner, CoreCode calldata code) external onlyOwner {
         Deployment storage deployed = deployment;
         if (treasury == address(0)) treasury = msg.sender;
         if (maxActiveRequests == 0) maxActiveRequests = 2;
+        if (proxyAdminOwner == address(0)) proxyAdminOwner = msg.sender;
         if (deployed.stakeVault == address(0) || deployed.reputationLedger == address(0)) revert BadConfig();
 
         deployed.commitReveal = _deploy("DAIOCommitRevealManager", code.commitReveal);
         deployed.priorityQueue = _deploy("DAIOPriorityQueue", code.priorityQueue);
         deployed.vrfVerifier = _deploy("FRAINVRFVerifier", code.vrfVerifier);
         deployed.vrfCoordinator = _deploy("DAIOVRFCoordinator", abi.encodePacked(code.vrfCoordinator, abi.encode(deployed.vrfVerifier)));
+        deployed.coreImplementation = _deploy("DAIOCoreImplementation", code.core);
         deployed.core = _deploy(
             "DAIOCore",
             abi.encodePacked(
-                code.core,
-                abi.encode(treasury, deployed.commitReveal, deployed.priorityQueue, deployed.vrfCoordinator, maxActiveRequests)
+                code.coreProxy,
+                abi.encode(
+                    deployed.coreImplementation,
+                    proxyAdminOwner,
+                    abi.encodeCall(
+                        IDAIOCoreDeployerTarget.initialize,
+                        (treasury, deployed.commitReveal, deployed.priorityQueue, deployed.vrfCoordinator, maxActiveRequests)
+                    )
+                )
             )
         );
         deployed.roundLedger = _deploy("DAIORoundLedger", code.roundLedger);
@@ -319,9 +338,9 @@ contract DAIOSystemDeployer {
             deployed.reputationLedger
         );
         IDAIOCoreDeployerTarget(deployed.core).setRoundLedger(deployed.roundLedger);
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(3, 7000, 1000, 25, 25, 2, 1, 100, 10 minutes));
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(1, _tierConfig(4, 8000, 1500, 50, 50, 3, 1, 300, 30 minutes));
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(2, _tierConfig(5, 10000, 2000, 100, 100, 5, 2, 900, 1 hours));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(8000, 3, 7000, 1000, 25, 25, 2, 1, 100, 10 minutes));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(1, _tierConfig(10000, 4, 8000, 1500, 50, 50, 3, 1, 300, 30 minutes));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(2, _tierConfig(10000, 5, 10000, 2000, 100, 100, 5, 2, 900, 1 hours));
         IDAIOCoreDeployerTarget(deployed.core).setPaymentRouter(deployed.paymentRouter);
 
         ICoreLinkedDeployerTarget(deployed.roundLedger).setCore(deployed.core);
@@ -373,6 +392,7 @@ contract DAIOSystemDeployer {
     }
 
     function _tierConfig(
+        uint16 reviewElectionDifficulty,
         uint16 reviewQuorum,
         uint16 auditCoverageQuorum,
         uint16 contributionThreshold,
@@ -385,7 +405,7 @@ contract DAIOSystemDeployer {
     ) internal pure returns (IDAIOCoreDeployerTarget.RequestConfig memory config) {
         uint16 peerAuditCount = reviewQuorum - 1;
         config = IDAIOCoreDeployerTarget.RequestConfig({
-            reviewElectionDifficulty: 10000,
+            reviewElectionDifficulty: reviewElectionDifficulty,
             auditElectionDifficulty: 10000,
             reviewCommitQuorum: reviewQuorum,
             reviewRevealQuorum: reviewQuorum,

@@ -2,6 +2,7 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 const vrfData = require("../lib/vrf-solidity/test/data.json");
+const { deployCoreProxy } = require("./helpers/deployCoreProxy");
 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
@@ -124,15 +125,13 @@ describe("DAIOCore", function () {
     const vrfCoordinator = await MockVRFCoordinator.deploy();
     await vrfCoordinator.waitForDeployment();
 
-    const DAIOCore = await ethers.getContractFactory("DAIOCore");
-    const core = await DAIOCore.deploy(
-      treasury.address,
-      await commitReveal.getAddress(),
-      await priorityQueue.getAddress(),
-      await vrfCoordinator.getAddress(),
+    const { core, coreImplementation, coreProxyAdmin } = await deployCoreProxy({
+      treasury: treasury.address,
+      commitReveal: await commitReveal.getAddress(),
+      priorityQueue: await priorityQueue.getAddress(),
+      vrfCoordinator: await vrfCoordinator.getAddress(),
       maxActiveRequests
-    );
-    await core.waitForDeployment();
+    });
 
     const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
     const roundLedger = await DAIORoundLedger.deploy();
@@ -296,7 +295,9 @@ describe("DAIOCore", function () {
       vrfCoordinator,
       vrfProof,
       roundLedger,
-      core
+      core,
+      coreImplementation,
+      coreProxyAdmin
     };
   }
 
@@ -452,6 +453,38 @@ describe("DAIOCore", function () {
 
     return { aliceAudit, bobAudit };
   }
+
+  it("runs through the transparent proxy and preserves state across implementation upgrades", async function () {
+    const fixture = await deployFixture();
+    const { owner, treasury, core, coreImplementation, coreProxyAdmin, stakeVault, commitReveal, priorityQueue, vrfCoordinator } = fixture;
+
+    await expect(
+      coreImplementation.initialize(
+        treasury.address,
+        await commitReveal.getAddress(),
+        await priorityQueue.getAddress(),
+        await vrfCoordinator.getAddress(),
+        1
+      )
+    ).to.be.revertedWithCustomError(coreImplementation, "InvalidInitialization");
+
+    const DAIOCoreV2Mock = await ethers.getContractFactory("DAIOCoreV2Mock");
+    const nextImplementation = await DAIOCoreV2Mock.deploy();
+    await nextImplementation.waitForDeployment();
+
+    const proxyAdmin = await ethers.getContractAt("ProxyAdmin", coreProxyAdmin);
+    await expect(
+      proxyAdmin.connect(treasury).upgradeAndCall(await core.getAddress(), await nextImplementation.getAddress(), "0x")
+    ).to.be.revertedWithCustomError(proxyAdmin, "OwnableUnauthorizedAccount");
+
+    await proxyAdmin.connect(owner).upgradeAndCall(await core.getAddress(), await nextImplementation.getAddress(), "0x");
+    const upgradedCore = await ethers.getContractAt("DAIOCoreV2Mock", await core.getAddress());
+
+    expect(await upgradedCore.coreVersion()).to.equal(2n);
+    expect(await upgradedCore.maxActiveRequests()).to.equal(1n);
+    expect(await upgradedCore.baseRequestFee()).to.equal(ethers.parseEther("100"));
+    expect(await upgradedCore.stakeVault()).to.equal(await stakeVault.getAddress());
+  });
 
   it("enumerates every registered reviewer in registration order", async function () {
     const { reviewerRegistry, reviewers } = await deployFixture();

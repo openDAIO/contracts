@@ -7,10 +7,15 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "clean": "hardhat clean",
-    "deploy:local": "hardhat run scripts/deploy.js --network localhost"
+    "deploy:local": "hardhat run scripts/deploy.js --network localhost",
+    "deploy:sepolia": "node scripts/run-with-rpc-fallback.js hardhat run scripts/deploy.js --network sepolia",
+    "finalize:sepolia": "node scripts/run-with-rpc-fallback.js hardhat run scripts/finalize-sepolia-deployment.js --network sepolia",
+    "setup:sepolia": "node scripts/run-with-rpc-fallback.js hardhat run scripts/setup-generated-wallets-sepolia.js --network sepolia",
+    "verify:sepolia": "node scripts/run-with-rpc-fallback.js hardhat run scripts/verify-sepolia-setup.js --network sepolia"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.0.2",
     "@uniswap/universal-router": "^2.1.0",
     "@uniswap/v4-core": "^1.0.2",
     "@uniswap/v4-periphery": "^1.0.3",

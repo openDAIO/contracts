@@ -4,16 +4,8 @@ const { ethers, network } = require("hardhat");
 const { ec: EC } = require("elliptic");
 const BN = require("bn.js");
 
-const DEPLOYED = {
-  usdaio: "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
-  stakeVault: "0x4053280d54a6C51750cE2dC0Bd8F26e86A758672",
-  reviewerRegistry: "0x02B15a4FB2bE5021A98B2965d84e869a2056607E",
-  commitReveal: "0x457f51523D008E7a00505D06ac431a98840C9B9b",
-  vrfCoordinator: "0x0F099E96307cF195D21472289BC72A5e3fabE38a",
-  core: "0x2cC3b1223C4C9F74d2C120F768954EE2E9BA439B",
-  roundLedger: "0xe7cFe62AA199ea12De728aF1200c6F1467a4d9cB",
-  paymentRouter: "0xf3AC3b4f5135aAcd65538ec3e2d307a0d574De52"
-};
+let DEPLOYED;
+let DEPLOYMENT_MIN_FORK_BLOCK = 0;
 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
@@ -24,9 +16,46 @@ const ROUND_REPUTATION_FINAL = 2;
 const SCALE = 10000n;
 const TX_GAS_LIMIT = 5_000_000;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
-const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
 const SECP256K1 = new EC("secp256k1");
 const SECP256K1_N = SECP256K1.curve.n;
+
+function deploymentAddresses(env) {
+  if (env.DAIO_DEPLOYMENT_FILE) {
+    const deployment = JSON.parse(fs.readFileSync(env.DAIO_DEPLOYMENT_FILE, "utf8"));
+    const contracts = deployment.contracts || deployment;
+    DEPLOYMENT_MIN_FORK_BLOCK = Number(deployment.finalizedAtBlock || deployment.deployedAtBlock || 0);
+    return {
+      usdaio: contracts.USDAIO,
+      stakeVault: contracts.StakeVault,
+      reviewerRegistry: contracts.ReviewerRegistry,
+      commitReveal: contracts.DAIOCommitRevealManager,
+      vrfCoordinator: contracts.DAIOVRFCoordinator,
+      core: contracts.DAIOCore,
+      roundLedger: contracts.DAIORoundLedger,
+      paymentRouter: contracts.PaymentRouter
+    };
+  }
+
+  return {
+    usdaio: env.DAIO_USDAIO_ADDRESS,
+    stakeVault: env.DAIO_STAKE_VAULT_ADDRESS,
+    reviewerRegistry: env.DAIO_REVIEWER_REGISTRY_ADDRESS,
+    commitReveal: env.DAIO_COMMIT_REVEAL_ADDRESS,
+    vrfCoordinator: env.DAIO_VRF_COORDINATOR_ADDRESS,
+    core: env.DAIO_CORE_ADDRESS,
+    roundLedger: env.DAIO_ROUND_LEDGER_ADDRESS,
+    paymentRouter: env.DAIO_PAYMENT_ROUTER_ADDRESS
+  };
+}
+
+function requireDeploymentAddresses(addresses) {
+  for (const [name, address] of Object.entries(addresses)) {
+    if (!address || !ethers.isAddress(address)) {
+      throw new Error(`${name} deployment address is required; set DAIO_DEPLOYMENT_FILE or DAIO_*_ADDRESS env vars`);
+    }
+  }
+  return addresses;
+}
 
 function parseEnvFile(path) {
   const out = {};
@@ -202,13 +231,14 @@ async function commitAudit(contracts, requestId, auditor, targets, scores) {
   const seed = BigInt(ethers.id(`${auditor.label}:audit`));
   const targetAddresses = targets.map((target) => target.address);
   const resultHash = await contracts.commitReveal.hashAuditReveal(requestId, auditor.address, targetAddresses, scores);
-  await contracts.commitReveal.connect(auditor.wallet).commitAudit(requestId, resultHash, seed, auditor.auditProofs, { gasLimit: TX_GAS_LIMIT });
+  await contracts.commitReveal.connect(auditor.wallet).commitAudit(requestId, resultHash, seed, [], { gasLimit: TX_GAS_LIMIT });
   return { seed, targetAddresses, scores };
 }
 
 async function runAttempt(env, premineBlocks) {
   const forkUrl = env.HARDHAT_FORK_URL || "https://ethereum-sepolia-rpc.publicnode.com";
   let forkBlock = env.HARDHAT_FORK_BLOCK ? Number(env.HARDHAT_FORK_BLOCK) : 0;
+  if (forkBlock && DEPLOYMENT_MIN_FORK_BLOCK && forkBlock < DEPLOYMENT_MIN_FORK_BLOCK) forkBlock = 0;
   if (!forkBlock) {
     const forkProvider = new ethers.JsonRpcProvider(forkUrl);
     forkBlock = await forkProvider.getBlockNumber();
@@ -284,7 +314,7 @@ async function runAttempt(env, premineBlocks) {
   const startReceipt = await startTx.wait();
   console.log("request.started", startReceipt.blockNumber);
   const lifecycleAfterStart = await contracts.core.getRequestLifecycle(requestId);
-  const config = { finalityFactor: 2, reviewDifficulty: 8000n, auditDifficulty: 10000n };
+  const config = { finalityFactor: 2, reviewDifficulty: 8000n };
   const reviewPhaseStartedBlock = BigInt(startReceipt.blockNumber);
   const selected = [];
   for (const agent of agents) {
@@ -324,28 +354,9 @@ async function runAttempt(env, premineBlocks) {
   }
   console.log("review.revealed", lastReviewRevealReceipt.blockNumber);
 
-  const lifecycleAfterReview = await contracts.core.getRequestLifecycle(requestId);
-  const auditPhaseStartedBlock = BigInt(lastReviewRevealReceipt.blockNumber);
   for (const auditor of reviewers) {
     const targets = reviewers.filter((target) => target.address !== auditor.address);
     auditor.auditTargets = targets;
-    auditor.auditProofs = [];
-    if (config.auditDifficulty < SCALE) {
-      for (const target of targets) {
-        const audit = await proofAndScore(
-          contracts,
-          auditor,
-          requestId,
-          AUDIT_SORTITION,
-          lifecycleAfterReview.auditEpoch,
-          target,
-          auditPhaseStartedBlock,
-          config.finalityFactor
-        );
-        if (audit.score >= config.auditDifficulty) throw new Error(`${auditor.label} failed audit sortition unexpectedly`);
-        auditor.auditProofs.push(audit.proof);
-      }
-    }
   }
 
   const auditCommits = [];
@@ -382,6 +393,7 @@ async function runAttempt(env, premineBlocks) {
 
 async function main() {
   const env = { ...parseEnvFile(".env"), ...process.env };
+  DEPLOYED = requireDeploymentAddresses(deploymentAddresses(env));
   for (let attempt = 0; attempt < 6; attempt++) {
     try {
       await runAttempt(env, attempt * 3);

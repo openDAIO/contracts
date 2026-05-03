@@ -1,3 +1,5 @@
+const fs = require("fs");
+const path = require("path");
 const { ethers, network } = require("hardhat");
 
 const CREATE2_DEPLOYER = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
@@ -18,6 +20,9 @@ const ACTION_SETTLE_PAIR = 0x0d;
 const ACTION_SWEEP = 0x14;
 const UINT128_MAX = (1n << 128n) - 1n;
 const UINT48_MAX = (1n << 48n) - 1n;
+const ERC1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
+let deploymentPath;
+let deploymentState;
 const SEPOLIA = {
   chainId: 11155111,
   ensRegistry: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
@@ -34,6 +39,12 @@ function envAddress(name, fallback) {
   const value = process.env[name] || fallback;
   if (!value) return undefined;
   return ethers.getAddress(value);
+}
+
+function envAddressList(name) {
+  const value = process.env[name];
+  if (!value) return [];
+  return value.split(",").map((item) => item.trim()).filter(Boolean).map((item) => ethers.getAddress(item));
 }
 
 function envUint(name, fallback) {
@@ -87,7 +98,73 @@ async function confirm(txPromise) {
   return tx;
 }
 
+async function proxyAdminAddress(proxyAddress) {
+  const raw = await ethers.provider.getStorage(proxyAddress, ERC1967_ADMIN_SLOT);
+  return ethers.getAddress(ethers.dataSlice(raw, 12));
+}
+
+function envString(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined || value === "") return fallback;
+  return value;
+}
+
+function deploymentFilePath() {
+  return envString("DAIO_DEPLOYMENT_FILE", `deployments/${network.name}.json`);
+}
+
+function emptyDeploymentState() {
+  return {
+    network: network.name,
+    chainId: Number(network.config.chainId || 0),
+    status: "partial",
+    contracts: {}
+  };
+}
+
+function loadDeploymentState() {
+  const file = deploymentFilePath();
+  if (!fs.existsSync(file)) return emptyDeploymentState();
+  const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+  return {
+    ...emptyDeploymentState(),
+    ...parsed,
+    contracts: { ...(parsed.contracts || parsed) }
+  };
+}
+
+function saveDeploymentState(extra = {}) {
+  deploymentState = { ...deploymentState, ...extra, status: extra.status || deploymentState.status || "partial" };
+  fs.mkdirSync(path.dirname(deploymentPath), { recursive: true });
+  fs.writeFileSync(deploymentPath, `${JSON.stringify(deploymentState, null, 2)}\n`);
+}
+
+async function recordContract(label, address) {
+  const normalized = ethers.getAddress(address);
+  deploymentState.contracts[label] = normalized;
+  saveDeploymentState();
+  return normalized;
+}
+
+async function hasCode(address) {
+  return (await ethers.provider.getCode(address)) !== "0x";
+}
+
+async function deployOrAttach(label, factoryName, args = []) {
+  const Factory = await ethers.getContractFactory(factoryName);
+  const existing = deploymentState.contracts[label];
+  if (existing && ethers.isAddress(existing) && await hasCode(existing)) {
+    return Factory.attach(existing);
+  }
+
+  const contract = await Factory.deploy(...args);
+  await contract.waitForDeployment();
+  await recordContract(label, await contract.getAddress());
+  return contract;
+}
+
 function config({
+  reviewElectionDifficulty = 10000,
   reviewCommitQuorum,
   reviewRevealQuorum,
   auditCommitQuorum,
@@ -107,7 +184,7 @@ function config({
   auditRevealTimeout
 }) {
   return {
-    reviewElectionDifficulty: 10000,
+    reviewElectionDifficulty,
     auditElectionDifficulty: 10000,
     reviewCommitQuorum,
     reviewRevealQuorum,
@@ -147,18 +224,19 @@ async function configureTiers(core) {
   await confirm(core.setTierConfig(
     0,
     config({
-      reviewCommitQuorum: 4,
-      reviewRevealQuorum: 4,
-      auditCommitQuorum: 4,
-      auditRevealQuorum: 4,
-      auditTargetLimit: 3,
-      minIncomingAudit: 1,
+      reviewElectionDifficulty: 8000,
+      reviewCommitQuorum: 3,
+      reviewRevealQuorum: 3,
+      auditCommitQuorum: 3,
+      auditRevealQuorum: 3,
+      auditTargetLimit: 2,
+      minIncomingAudit: 2,
       auditCoverageQuorum: 7000,
       contributionThreshold: 1000,
       reviewEpochSize: 25,
       auditEpochSize: 25,
       finalityFactor: 2,
-      maxRetries: 0,
+      maxRetries: 1,
       cooldownBlocks: 100,
       ...phaseTimeouts(10)
     })
@@ -171,7 +249,7 @@ async function configureTiers(core) {
       auditCommitQuorum: 4,
       auditRevealQuorum: 4,
       auditTargetLimit: 3,
-      minIncomingAudit: 2,
+      minIncomingAudit: 3,
       auditCoverageQuorum: 8000,
       contributionThreshold: 1500,
       reviewEpochSize: 50,
@@ -185,13 +263,13 @@ async function configureTiers(core) {
   await confirm(core.setTierConfig(
     2,
     config({
-      reviewCommitQuorum: 4,
-      reviewRevealQuorum: 4,
-      auditCommitQuorum: 4,
-      auditRevealQuorum: 4,
+      reviewCommitQuorum: 5,
+      reviewRevealQuorum: 5,
+      auditCommitQuorum: 5,
+      auditRevealQuorum: 5,
       auditTargetLimit: 4,
-      minIncomingAudit: 3,
-      auditCoverageQuorum: 9000,
+      minIncomingAudit: 4,
+      auditCoverageQuorum: 10000,
       contributionThreshold: 2000,
       reviewEpochSize: 100,
       auditEpochSize: 100,
@@ -373,6 +451,13 @@ async function configureV4EthUsdaioPool({ deployer, usdaio, hook, poolManagerAdd
 
 async function main() {
   const [deployer] = await ethers.getSigners();
+  deploymentPath = deploymentFilePath();
+  deploymentState = loadDeploymentState();
+  deploymentState.network = network.name;
+  deploymentState.chainId = Number(network.config.chainId || (await ethers.provider.getNetwork()).chainId);
+  deploymentState.deployer = deployer.address;
+  saveDeploymentState();
+
   const isSepolia = network.config.chainId === SEPOLIA.chainId;
   const expectedReviewers = envUint("DAIO_EXPECTED_REVIEWER_COUNT", DEFAULT_EXPECTED_REVIEWERS);
   if (expectedReviewers < DEFAULT_EXPECTED_REVIEWERS) throw new Error("DAIO_EXPECTED_REVIEWER_COUNT should be at least 5 for this deployment profile");
@@ -380,71 +465,50 @@ async function main() {
   const reusableUsdaioAddress = envAddress("REUSE_USDAIO_ADDRESS") || envAddress("EXISTING_USDAIO_ADDRESS");
   let usdaio;
   if (reusableUsdaioAddress) {
-    if ((await ethers.provider.getCode(reusableUsdaioAddress)) === "0x") throw new Error("REUSE_USDAIO_ADDRESS has no code");
+    if (!await hasCode(reusableUsdaioAddress)) throw new Error("REUSE_USDAIO_ADDRESS has no code");
+    await recordContract("USDAIO", reusableUsdaioAddress);
     usdaio = await ethers.getContractAt("USDAIOToken", reusableUsdaioAddress);
   } else {
-    const USDAIO = await ethers.getContractFactory("USDAIOToken");
-    usdaio = await USDAIO.deploy(deployer.address);
-    await usdaio.waitForDeployment();
+    usdaio = await deployOrAttach("USDAIO", "USDAIOToken", [deployer.address]);
   }
 
-  const StakeVault = await ethers.getContractFactory("StakeVault");
-  const stakeVault = await StakeVault.deploy(await usdaio.getAddress());
-  await stakeVault.waitForDeployment();
+  const stakeVault = await deployOrAttach("StakeVault", "StakeVault", [await usdaio.getAddress()]);
 
-  const ReviewerRegistry = await ethers.getContractFactory("ReviewerRegistry");
-  const reviewerRegistry = await ReviewerRegistry.deploy(await stakeVault.getAddress());
-  await reviewerRegistry.waitForDeployment();
+  const reviewerRegistry = await deployOrAttach("ReviewerRegistry", "ReviewerRegistry", [await stakeVault.getAddress()]);
 
-  const AssignmentManager = await ethers.getContractFactory("AssignmentManager");
-  const assignmentManager = await AssignmentManager.deploy();
-  await assignmentManager.waitForDeployment();
+  const assignmentManager = await deployOrAttach("AssignmentManager", "AssignmentManager");
 
-  const ConsensusScoring = await ethers.getContractFactory("ConsensusScoring");
-  const consensusScoring = await ConsensusScoring.deploy();
-  await consensusScoring.waitForDeployment();
+  const consensusScoring = await deployOrAttach("ConsensusScoring", "ConsensusScoring");
 
-  const Settlement = await ethers.getContractFactory("Settlement");
-  const settlement = await Settlement.deploy();
-  await settlement.waitForDeployment();
+  const settlement = await deployOrAttach("Settlement", "Settlement");
 
-  const ReputationLedger = await ethers.getContractFactory("ReputationLedger");
-  const reputationLedger = await ReputationLedger.deploy();
-  await reputationLedger.waitForDeployment();
+  const reputationLedger = await deployOrAttach("ReputationLedger", "ReputationLedger");
 
-  const CommitReveal = await ethers.getContractFactory("DAIOCommitRevealManager");
-  const commitReveal = await CommitReveal.deploy();
-  await commitReveal.waitForDeployment();
+  const commitReveal = await deployOrAttach("DAIOCommitRevealManager", "DAIOCommitRevealManager");
 
-  const PriorityQueue = await ethers.getContractFactory("DAIOPriorityQueue");
-  const priorityQueue = await PriorityQueue.deploy();
-  await priorityQueue.waitForDeployment();
+  const priorityQueue = await deployOrAttach("DAIOPriorityQueue", "DAIOPriorityQueue");
 
-  const FRAINVRFVerifier = await ethers.getContractFactory("FRAINVRFVerifier");
-  const vrfVerifier = await FRAINVRFVerifier.deploy();
-  await vrfVerifier.waitForDeployment();
+  const vrfVerifier = await deployOrAttach("FRAINVRFVerifier", "FRAINVRFVerifier");
 
-  const DAIOVRFCoordinator = await ethers.getContractFactory("DAIOVRFCoordinator");
-  const vrfCoordinator = await DAIOVRFCoordinator.deploy(await vrfVerifier.getAddress());
-  await vrfCoordinator.waitForDeployment();
+  const vrfCoordinator = await deployOrAttach("DAIOVRFCoordinator", "DAIOVRFCoordinator", [await vrfVerifier.getAddress()]);
 
   const DAIOCore = await ethers.getContractFactory("DAIOCore");
-  const core = await DAIOCore.deploy(
+  const coreImplementation = await deployOrAttach("DAIOCoreImplementation", "DAIOCore");
+  const coreInitializer = DAIOCore.interface.encodeFunctionData("initialize", [
     deployer.address,
     await commitReveal.getAddress(),
     await priorityQueue.getAddress(),
     await vrfCoordinator.getAddress(),
     envUint("DAIO_MAX_ACTIVE_REQUESTS", 2)
-  );
-  await core.waitForDeployment();
+  ]);
+  const coreProxy = await deployOrAttach("DAIOCore", "DAIOTransparentUpgradeableProxy", [await coreImplementation.getAddress(), deployer.address, coreInitializer]);
+  const core = DAIOCore.attach(await coreProxy.getAddress());
+  const coreProxyAdmin = await proxyAdminAddress(await core.getAddress());
+  await recordContract("DAIOCoreProxyAdmin", coreProxyAdmin);
 
-  const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
-  const roundLedger = await DAIORoundLedger.deploy();
-  await roundLedger.waitForDeployment();
+  const roundLedger = await deployOrAttach("DAIORoundLedger", "DAIORoundLedger");
 
-  const DAIOInfoReader = await ethers.getContractFactory("DAIOInfoReader");
-  const infoReader = await DAIOInfoReader.deploy(await core.getAddress());
-  await infoReader.waitForDeployment();
+  const infoReader = await deployOrAttach("DAIOInfoReader", "DAIOInfoReader", [await core.getAddress()]);
 
   await confirm(core.setModules(
     await stakeVault.getAddress(),
@@ -473,9 +537,7 @@ async function main() {
     : undefined;
   let ensVerifier;
   if (ensRegistry) {
-    const ENSVerifier = await ethers.getContractFactory("ENSVerifier");
-    ensVerifier = await ENSVerifier.deploy(ensRegistry);
-    await ensVerifier.waitForDeployment();
+    ensVerifier = await deployOrAttach("ENSVerifier", "ENSVerifier", [ensRegistry]);
   }
 
   const enableERC8004 = envBool("ENABLE_ERC8004_ADAPTER", isSepolia);
@@ -487,9 +549,7 @@ async function main() {
     : undefined;
   let erc8004Adapter;
   if (erc8004IdentityRegistry && erc8004ReputationRegistry) {
-    const ERC8004Adapter = await ethers.getContractFactory("ERC8004Adapter");
-    erc8004Adapter = await ERC8004Adapter.deploy(erc8004IdentityRegistry, erc8004ReputationRegistry);
-    await erc8004Adapter.waitForDeployment();
+    erc8004Adapter = await deployOrAttach("ERC8004Adapter", "ERC8004Adapter", [erc8004IdentityRegistry, erc8004ReputationRegistry]);
     await confirm(erc8004Adapter.setWriter(await reputationLedger.getAddress()));
     await confirm(reputationLedger.setERC8004Adapter(await erc8004Adapter.getAddress()));
   }
@@ -500,9 +560,7 @@ async function main() {
     ));
   }
 
-  const AcceptedTokenRegistry = await ethers.getContractFactory("AcceptedTokenRegistry");
-  const acceptedTokenRegistry = await AcceptedTokenRegistry.deploy(await usdaio.getAddress());
-  await acceptedTokenRegistry.waitForDeployment();
+  const acceptedTokenRegistry = await deployOrAttach("AcceptedTokenRegistry", "AcceptedTokenRegistry", [await usdaio.getAddress()]);
 
   const usdcAddress = envAddress("USDC_ADDRESS", isSepolia ? SEPOLIA.usdc : undefined);
   const usdtAddress = envAddress("USDT_ADDRESS");
@@ -521,33 +579,48 @@ async function main() {
   let autoConvertHook;
   let v4PoolConfig;
   if (universalRouterAddress) {
-    const UniswapV4SwapAdapter = await ethers.getContractFactory("UniswapV4SwapAdapter");
-    swapAdapter = await UniswapV4SwapAdapter.deploy(universalRouterAddress);
-    await swapAdapter.waitForDeployment();
+    swapAdapter = await deployOrAttach("UniswapV4SwapAdapter", "UniswapV4SwapAdapter", [universalRouterAddress]);
 
-    const PaymentRouter = await ethers.getContractFactory("PaymentRouter");
-    paymentRouter = await PaymentRouter.deploy(
+    paymentRouter = await deployOrAttach("PaymentRouter", "PaymentRouter", [
       await usdaio.getAddress(),
       await core.getAddress(),
       await acceptedTokenRegistry.getAddress(),
       await swapAdapter.getAddress()
-    );
-    await paymentRouter.waitForDeployment();
+    ]);
     await confirm(core.setPaymentRouter(await paymentRouter.getAddress()));
     await confirm(swapAdapter.setPaymentRouter(await paymentRouter.getAddress()));
 
     if (poolManagerAddress && envBool("ENABLE_AUTO_CONVERT_HOOK", isSepolia)) {
       const reusableHookAddress = envAddress("REUSE_AUTO_CONVERT_HOOK_ADDRESS") || envAddress("EXISTING_AUTO_CONVERT_HOOK_ADDRESS");
       if (reusableHookAddress) {
-        if ((await ethers.provider.getCode(reusableHookAddress)) === "0x") throw new Error("REUSE_AUTO_CONVERT_HOOK_ADDRESS has no code");
+        if (!await hasCode(reusableHookAddress)) throw new Error("REUSE_AUTO_CONVERT_HOOK_ADDRESS has no code");
+        await recordContract("DAIOAutoConvertHook", reusableHookAddress);
         autoConvertHook = await ethers.getContractAt("DAIOAutoConvertHook", reusableHookAddress);
         if ((await autoConvertHook.usdaio()) !== await usdaio.getAddress()) throw new Error("Reused hook USDAIO mismatch");
         await confirm(autoConvertHook.setPaymentRouter(await paymentRouter.getAddress()));
       } else {
-        autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
+        const existingHook = deploymentState.contracts.DAIOAutoConvertHook;
+        if (existingHook && ethers.isAddress(existingHook) && await hasCode(existingHook)) {
+          autoConvertHook = await ethers.getContractAt("DAIOAutoConvertHook", existingHook);
+        } else {
+          autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
+          await recordContract("DAIOAutoConvertHook", await autoConvertHook.getAddress());
+        }
       }
       await confirm(autoConvertHook.setIntentWriter(await swapAdapter.getAddress(), true));
       await confirm(autoConvertHook.setAllowedRouter(universalRouterAddress, true));
+      const hookPoolKey = ethUsdaioPoolKey(
+        await usdaio.getAddress(),
+        await autoConvertHook.getAddress(),
+        envUint("DAIO_V4_POOL_FEE", DEFAULT_V4_POOL_FEE),
+        envInt("DAIO_V4_TICK_SPACING", DEFAULT_V4_TICK_SPACING)
+      );
+      await confirm(autoConvertHook.setPool(await autoConvertHook.poolKeyHash(poolKeyTuple(hookPoolKey)), true));
+      for (const writer of envAddressList("REVOKE_AUTO_CONVERT_HOOK_WRITERS")) {
+        if (writer !== await paymentRouter.getAddress() && writer !== await swapAdapter.getAddress()) {
+          await confirm(autoConvertHook.setIntentWriter(writer, false));
+        }
+      }
       await confirm(swapAdapter.setAutoConvertHook(await autoConvertHook.getAddress()));
       if (!reusableHookAddress && envBool("CONFIGURE_V4_ETH_USDAIO_POOL", isSepolia)) {
         v4PoolConfig = await configureV4EthUsdaioPool({
@@ -575,6 +648,8 @@ async function main() {
   console.log("DAIOPriorityQueue:", await priorityQueue.getAddress());
   console.log("FRAINVRFVerifier:", await vrfVerifier.getAddress());
   console.log("DAIOVRFCoordinator:", await vrfCoordinator.getAddress());
+  console.log("DAIOCoreImplementation:", await coreImplementation.getAddress());
+  console.log("DAIOCoreProxyAdmin:", coreProxyAdmin);
   console.log("DAIOCore:", await core.getAddress());
   console.log("DAIOInfoReader:", await infoReader.getAddress());
   console.log("DAIORoundLedger:", await roundLedger.getAddress());
@@ -602,6 +677,61 @@ async function main() {
       console.log("V4 ETH/USDAIO Liquidity:", v4PoolConfig.liquidity.toString());
     }
   }
+
+  const latestBlock = await ethers.provider.getBlock("latest");
+  const uniswapPoolKey = autoConvertHook
+    ? ethUsdaioPoolKey(
+        await usdaio.getAddress(),
+        await autoConvertHook.getAddress(),
+        envUint("DAIO_V4_POOL_FEE", DEFAULT_V4_POOL_FEE),
+        envInt("DAIO_V4_TICK_SPACING", DEFAULT_V4_TICK_SPACING)
+      )
+    : undefined;
+  const deployment = {
+    network: network.name,
+    chainId: Number(network.config.chainId || (await ethers.provider.getNetwork()).chainId),
+    deployedAtBlock: latestBlock.number,
+    deployer: deployer.address,
+    contracts: {
+      USDAIO: await usdaio.getAddress(),
+      StakeVault: await stakeVault.getAddress(),
+      ReviewerRegistry: await reviewerRegistry.getAddress(),
+      AssignmentManager: await assignmentManager.getAddress(),
+      ConsensusScoring: await consensusScoring.getAddress(),
+      Settlement: await settlement.getAddress(),
+      ReputationLedger: await reputationLedger.getAddress(),
+      DAIOCommitRevealManager: await commitReveal.getAddress(),
+      DAIOPriorityQueue: await priorityQueue.getAddress(),
+      FRAINVRFVerifier: await vrfVerifier.getAddress(),
+      DAIOVRFCoordinator: await vrfCoordinator.getAddress(),
+      DAIOCoreImplementation: await coreImplementation.getAddress(),
+      DAIOCoreProxyAdmin: coreProxyAdmin,
+      DAIOCore: await core.getAddress(),
+      DAIORoundLedger: await roundLedger.getAddress(),
+      DAIOInfoReader: await infoReader.getAddress(),
+      ENSVerifier: ensVerifier ? await ensVerifier.getAddress() : ethers.ZeroAddress,
+      ERC8004Adapter: erc8004Adapter ? await erc8004Adapter.getAddress() : ethers.ZeroAddress,
+      AcceptedTokenRegistry: await acceptedTokenRegistry.getAddress(),
+      UniswapV4SwapAdapter: swapAdapter ? await swapAdapter.getAddress() : ethers.ZeroAddress,
+      PaymentRouter: paymentRouter ? await paymentRouter.getAddress() : ethers.ZeroAddress,
+      DAIOAutoConvertHook: autoConvertHook ? await autoConvertHook.getAddress() : ethers.ZeroAddress
+    },
+    uniswapV4EthUsdaioPool: autoConvertHook
+      ? {
+          currency0: uniswapPoolKey.currency0,
+          currency1: uniswapPoolKey.currency1,
+          fee: uniswapPoolKey.fee,
+          tickSpacing: uniswapPoolKey.tickSpacing,
+          hook: await autoConvertHook.getAddress(),
+          poolKeyHash: await autoConvertHook.poolKeyHash(poolKeyTuple(uniswapPoolKey)),
+          status: envAddress("REUSE_AUTO_CONVERT_HOOK_ADDRESS") || envAddress("EXISTING_AUTO_CONVERT_HOOK_ADDRESS") ? "reused" : "created"
+        }
+      : undefined
+  };
+
+  deploymentState = deployment;
+  saveDeploymentState({ status: "complete" });
+  console.log("DeploymentFile:", deploymentPath);
 }
 
 main().catch((error) => {

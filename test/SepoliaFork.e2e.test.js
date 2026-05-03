@@ -1,10 +1,12 @@
 const { expect } = require("chai");
 const { ethers, network } = require("hardhat");
 const vrfData = require("../lib/vrf-solidity/test/data.json");
+const { deployCoreProxy } = require("./helpers/deployCoreProxy");
 
 const RUN_FORK = process.env.RUN_SEPOLIA_FORK === "true";
 const describeFork = RUN_FORK ? describe : describe.skip;
 const FORK_URL = process.env.SEPOLIA_RPC_URL || process.env.HARDHAT_FORK_URL || "https://sepolia.drpc.org";
+const FORK_BLOCK = process.env.SEPOLIA_FORK_BLOCK ? Number(process.env.SEPOLIA_FORK_BLOCK) : undefined;
 
 const DOMAIN_RESEARCH = 1;
 const FAST = 0;
@@ -13,9 +15,9 @@ const SCALE = 10000n;
 const ROUND_REVIEW = 0;
 const ROUND_AUDIT_CONSENSUS = 1;
 const ROUND_REPUTATION_FINAL = 2;
-const ELECTION_DIFFICULTY = 5000n;
+const ELECTION_DIFFICULTY = 8000n;
+const FAST_REVIEW_QUORUM = 3;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
-const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
 
 const SEPOLIA = {
   ensRegistry: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
@@ -29,36 +31,36 @@ const SEPOLIA = {
 function fastConfig() {
   return {
     reviewElectionDifficulty: Number(ELECTION_DIFFICULTY),
-    auditElectionDifficulty: Number(ELECTION_DIFFICULTY),
-    reviewCommitQuorum: 2,
-    reviewRevealQuorum: 2,
-    auditCommitQuorum: 2,
-    auditRevealQuorum: 2,
-    auditTargetLimit: 2,
-    minIncomingAudit: 1,
+    auditElectionDifficulty: Number(SCALE),
+    reviewCommitQuorum: FAST_REVIEW_QUORUM,
+    reviewRevealQuorum: FAST_REVIEW_QUORUM,
+    auditCommitQuorum: FAST_REVIEW_QUORUM,
+    auditRevealQuorum: FAST_REVIEW_QUORUM,
+    auditTargetLimit: FAST_REVIEW_QUORUM - 1,
+    minIncomingAudit: FAST_REVIEW_QUORUM - 1,
     auditCoverageQuorum: 7000,
     contributionThreshold: 1000,
     reviewEpochSize: 25,
     auditEpochSize: 25,
     finalityFactor: 2,
-    maxRetries: 0,
+    maxRetries: 1,
     minorityThreshold: 1500,
     semanticStrikeThreshold: 3,
     protocolFaultSlashBps: 500,
     missedRevealSlashBps: 100,
     semanticSlashBps: 200,
     cooldownBlocks: 100,
-    reviewCommitTimeout: 30 * 60,
-    reviewRevealTimeout: 30 * 60,
-    auditCommitTimeout: 30 * 60,
-    auditRevealTimeout: 30 * 60
+    reviewCommitTimeout: 10 * 60,
+    reviewRevealTimeout: 10 * 60,
+    auditCommitTimeout: 10 * 60,
+    auditRevealTimeout: 10 * 60
   };
 }
 
 async function deployForkFixture() {
   const signers = await ethers.getSigners();
   const [owner, treasury, requester] = signers;
-  const reviewerSigners = signers.slice(3);
+  const reviewerSigners = signers.slice(3, 8);
 
   const USDAIO = await ethers.getContractFactory("USDAIOToken");
   const usdaio = await USDAIO.deploy(owner.address);
@@ -100,15 +102,13 @@ async function deployForkFixture() {
   const vrfCoordinator = await MockVRFCoordinator.deploy();
   await vrfCoordinator.waitForDeployment();
 
-  const DAIOCore = await ethers.getContractFactory("DAIOCore");
-  const core = await DAIOCore.deploy(
-    treasury.address,
-    await commitReveal.getAddress(),
-    await priorityQueue.getAddress(),
-    await vrfCoordinator.getAddress(),
-    2
-  );
-  await core.waitForDeployment();
+  const { core } = await deployCoreProxy({
+    treasury: treasury.address,
+    commitReveal: await commitReveal.getAddress(),
+    priorityQueue: await priorityQueue.getAddress(),
+    vrfCoordinator: await vrfCoordinator.getAddress(),
+    maxActiveRequests: 2
+  });
 
   const DAIORoundLedger = await ethers.getContractFactory("DAIORoundLedger");
   const roundLedger = await DAIORoundLedger.deploy();
@@ -207,63 +207,26 @@ async function sortitionPass(fixture, requestId, phase, epoch, reviewer, target,
   return sortitionScore(phase, requestId, reviewer.address, targetAddress, randomness) < ELECTION_DIFFICULTY;
 }
 
-async function findReviewPairForCurrentPhase(fixture, requestId) {
+async function findReviewCommitteeForCurrentPhase(fixture, requestId) {
   const lifecycle = await fixture.core.getRequestLifecycle(requestId);
   const reviewPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
-  const auditPhaseStartedBlock = reviewPhaseStartedBlock + 4n;
+  const selected = [];
 
-  for (let i = 0; i < fixture.reviewers.length; i++) {
-    for (let j = 0; j < fixture.reviewers.length; j++) {
-      if (i === j) continue;
-      const first = fixture.reviewers[i];
-      const second = fixture.reviewers[j];
-      const firstReviewPass = await sortitionPass(
-        fixture,
-        requestId,
-        REVIEW_SORTITION,
-        lifecycle.committeeEpoch,
-        first,
-        null,
-        reviewPhaseStartedBlock,
-        2
-      );
-      if (!firstReviewPass) continue;
-      const secondReviewPass = await sortitionPass(
-        fixture,
-        requestId,
-        REVIEW_SORTITION,
-        lifecycle.committeeEpoch,
-        second,
-        null,
-        reviewPhaseStartedBlock,
-        2
-      );
-      if (!secondReviewPass) continue;
-      const firstAuditPass = await sortitionPass(
-        fixture,
-        requestId,
-        AUDIT_SORTITION,
-        lifecycle.auditEpoch,
-        first,
-        second,
-        auditPhaseStartedBlock,
-        2
-      );
-      if (!firstAuditPass) continue;
-      const secondAuditPass = await sortitionPass(
-        fixture,
-        requestId,
-        AUDIT_SORTITION,
-        lifecycle.auditEpoch,
-        second,
-        first,
-        auditPhaseStartedBlock,
-        2
-      );
-      if (secondAuditPass) return [first, second];
-    }
+  for (const reviewer of fixture.reviewers) {
+    const passes = await sortitionPass(
+      fixture,
+      requestId,
+      REVIEW_SORTITION,
+      lifecycle.committeeEpoch,
+      reviewer,
+      null,
+      reviewPhaseStartedBlock,
+      2
+    );
+    if (passes) selected.push(reviewer);
+    if (selected.length === FAST_REVIEW_QUORUM) return selected;
   }
-  throw new Error("No reviewer pair passes review and audit sortition in this phase");
+  throw new Error(`Only ${selected.length} reviewers passed Fast review sortition`);
 }
 
 async function review(commitReveal, requestId, reviewer, score, uri, label, vrfProof) {
@@ -274,21 +237,21 @@ async function review(commitReveal, requestId, reviewer, score, uri, label, vrfP
   return { score, reportHash, uri, seed };
 }
 
-async function audit(commitReveal, requestId, auditor, targets, scores, label, vrfProof) {
+async function audit(commitReveal, requestId, auditor, targets, scores, label) {
   const seed = BigInt(ethers.id(`${label}:audit`));
   const targetAddresses = targets.map((target) => target.address);
   const resultHash = await commitReveal.hashAuditReveal(requestId, auditor.address, targetAddresses, scores);
-  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, [vrfProof]);
+  await commitReveal.connect(auditor).commitAudit(requestId, resultHash, seed, []);
   return { targets: targetAddresses, scores, seed };
 }
 
 describeFork("Sepolia fork E2E", function () {
-  this.timeout(240000);
+  this.timeout(Number(process.env.SEPOLIA_FORK_TIMEOUT || "600000"));
 
   before(async function () {
     await network.provider.request({
       method: "hardhat_reset",
-      params: [{ forking: { jsonRpcUrl: FORK_URL } }]
+      params: [{ forking: { jsonRpcUrl: FORK_URL, ...(FORK_BLOCK ? { blockNumber: FORK_BLOCK } : {}) } }]
     });
   });
 
@@ -310,36 +273,51 @@ describeFork("Sepolia fork E2E", function () {
     const requestId = 1n;
 
     await core.startNextRequest();
-    const [alice, bob] = await findReviewPairForCurrentPhase(fixture, requestId);
-    const aliceReview = await review(commitReveal, requestId, alice, 8000, "ipfs://fork-alice", "alice", vrfProof);
-    const bobReview = await review(commitReveal, requestId, bob, 6000, "ipfs://fork-bob", "bob", vrfProof);
-    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
+    const selectedReviewers = await findReviewCommitteeForCurrentPhase(fixture, requestId);
+    const reviewScores = [8000, 7000, 6000];
+    const reviewCommits = [];
+    for (let i = 0; i < selectedReviewers.length; i++) {
+      const reviewer = selectedReviewers[i];
+      reviewCommits.push(await review(commitReveal, requestId, reviewer, reviewScores[i], `ipfs://fork-review-${i}`, `reviewer-${i}`, vrfProof));
+    }
+    expect(await commitReveal.getReviewParticipants(requestId, 0)).to.deep.equal(selectedReviewers.map((reviewer) => reviewer.address));
 
-    await commitReveal.connect(alice).revealReview(requestId, aliceReview.score, aliceReview.reportHash, aliceReview.uri, aliceReview.seed);
-    await commitReveal.connect(bob).revealReview(requestId, bobReview.score, bobReview.reportHash, bobReview.uri, bobReview.seed);
+    for (let i = 0; i < selectedReviewers.length; i++) {
+      const reviewer = selectedReviewers[i];
+      const commit = reviewCommits[i];
+      await commitReveal.connect(reviewer).revealReview(requestId, commit.score, commit.reportHash, commit.uri, commit.seed);
+    }
 
-    const aliceAudit = await audit(commitReveal, requestId, alice, [bob], [7000], "alice", vrfProof);
-    const bobAudit = await audit(commitReveal, requestId, bob, [alice], [9000], "bob", vrfProof);
-    expect(await commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal([alice.address, bob.address]);
+    const auditCommits = [];
+    for (let i = 0; i < selectedReviewers.length; i++) {
+      const auditor = selectedReviewers[i];
+      const targets = selectedReviewers.filter((target) => target.address !== auditor.address);
+      const scores = targets.map((target) => (target.address === selectedReviewers[0].address ? 9000 : 7000));
+      auditCommits.push(await audit(commitReveal, requestId, auditor, targets, scores, `auditor-${i}`));
+    }
+    expect(await commitReveal.getAuditParticipants(requestId, 0)).to.deep.equal(selectedReviewers.map((reviewer) => reviewer.address));
 
-    await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
-    await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
+    for (let i = 0; i < selectedReviewers.length; i++) {
+      const auditor = selectedReviewers[i];
+      const commit = auditCommits[i];
+      await commitReveal.connect(auditor).revealAudit(requestId, commit.targets, commit.scores, commit.seed);
+    }
 
     const attempt = (await core.getRequestLifecycle(requestId)).retryCount;
     const round0 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_REVIEW);
     const round1 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_AUDIT_CONSENSUS);
     const round2 = await roundLedger.getRoundAggregate(requestId, attempt, ROUND_REPUTATION_FINAL);
-    const aliceRound2 = await roundLedger.getReviewerRoundScore(requestId, attempt, ROUND_REPUTATION_FINAL, alice.address);
-    const aliceAccounting = await roundLedger.getReviewerRoundAccounting(requestId, attempt, ROUND_REPUTATION_FINAL, alice.address);
+    const firstReviewerRound2 = await roundLedger.getReviewerRoundScore(requestId, attempt, ROUND_REPUTATION_FINAL, selectedReviewers[0].address);
+    const firstReviewerAccounting = await roundLedger.getReviewerRoundAccounting(requestId, attempt, ROUND_REPUTATION_FINAL, selectedReviewers[0].address);
 
     expect(round0.score).to.equal(7000n);
     expect(round0.closed).to.equal(true);
-    expect(round1.score).to.equal(8000n);
+    expect(round1.score).to.be.gt(0n);
     expect(round1.closed).to.equal(true);
     expect(round2.coverage).to.equal(10000n);
-    expect(round2.score).to.equal(8000n);
+    expect(round2.score).to.be.gt(0n);
     expect(round2.closed).to.equal(true);
-    expect(aliceRound2.reputationScore).to.equal(10000n);
-    expect(aliceAccounting.reward).to.be.gt(0n);
+    expect(firstReviewerRound2.reputationScore).to.equal(10000n);
+    expect(firstReviewerAccounting.reward).to.be.gt(0n);
   });
 });

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {Initializable} from "@openzeppelin/contracts/proxy/utils/Initializable.sol";
+
 interface ICommitReveal {
     function saved_commits(uint256 round, address participant) external view returns (bytes32);
     function reveal_hashed(bytes32 resultHash, address participant, uint256 seed, uint256 round) external returns (bool);
@@ -174,7 +176,7 @@ interface IReviewerRegistryLike {
         );
 }
 
-contract DAIOCore {
+contract DAIOCore is Initializable {
     uint256 internal constant SCALE = 10_000;
     uint256 internal constant BPS = 10_000;
     uint8 internal constant ROUND_REVIEW = 0;
@@ -183,9 +185,6 @@ contract DAIOCore {
 
     bytes32 internal constant REVIEW_SORTITION = keccak256("DAIO_REVIEW_SORTITION");
 
-    ICommitReveal internal immutable commitReveal;
-    IPriorityQueue internal immutable priorityQueue;
-    IDAIOVRFCoordinator internal immutable vrfCoordinator;
     address internal owner;
     address internal treasury;
     address internal paymentRouter;
@@ -197,13 +196,12 @@ contract DAIOCore {
     IReputationLedgerLike internal reputationLedger;
     IDAIORoundLedgerLike internal roundLedger;
 
-    uint256 public baseRequestFee = 100 ether;
-    uint256 public immutable maxActiveRequests;
+    uint256 public baseRequestFee;
     uint256 internal activeRequestCount;
     uint256 internal constant protocolFeeBps = 1_000;
     uint256 internal requestCount;
 
-    uint256 private _locked = 1;
+    uint256 private _locked;
 
     enum RequestStatus {
         None,
@@ -336,6 +334,14 @@ contract DAIOCore {
     mapping(uint256 requestId => mapping(address auditor => address[] targets)) private _auditTargetsByAuditor;
     mapping(uint256 requestId => mapping(address auditor => address[] targets)) private _canonicalTargetsByAuditor;
 
+    // Stored after the DAIOInfoReader slot map so its low-level views remain stable.
+    ICommitReveal internal commitReveal;
+    IPriorityQueue internal priorityQueue;
+    IDAIOVRFCoordinator internal vrfCoordinator;
+    uint256 public maxActiveRequests;
+
+    uint256[46] private __gap;
+
     event RequestFinalized(uint256 indexed requestId, uint256 finalProposalScore, uint256 confidence, bool lowConfidence);
     event ReviewRevealed(uint256 requestId, address reviewer, uint16 proposalScore, bytes32 reportHash, string reportURI);
     event StatusChanged(uint256 indexed requestId, RequestStatus status);
@@ -366,13 +372,17 @@ contract DAIOCore {
         _locked = 1;
     }
 
-    constructor(
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(
         address treasury_,
         address commitReveal_,
         address priorityQueue_,
         address vrfCoordinator_,
         uint256 maxActiveRequests_
-    ) {
+    ) external initializer {
         if (
             treasury_ == address(0) || commitReveal_ == address(0) || priorityQueue_ == address(0) || vrfCoordinator_ == address(0)
                 || maxActiveRequests_ == 0
@@ -386,6 +396,8 @@ contract DAIOCore {
         owner = msg.sender;
         treasury = treasury_;
         maxActiveRequests = maxActiveRequests_;
+        baseRequestFee = 100 ether;
+        _locked = 1;
     }
 
     function transferOwnership(address newOwner) external onlyOwner {

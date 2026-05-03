@@ -2,6 +2,7 @@ const { ethers, network } = require("hardhat");
 
 const AFTER_SWAP_FLAG = 1n << 6n;
 const HOOK_FLAG_MASK = (1n << 14n) - 1n;
+const ERC1967_ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
 const SEPOLIA = {
   chainId: 11155111,
   ensRegistry: "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e",
@@ -55,6 +56,11 @@ function requireAddress(deployed, name) {
   return deployed[name];
 }
 
+async function proxyAdminAddress(proxyAddress) {
+  const raw = await ethers.provider.getStorage(proxyAddress, ERC1967_ADMIN_SLOT);
+  return ethers.getAddress(ethers.dataSlice(raw, 12));
+}
+
 async function runStage(systemDeployer, label, txPromise, deployed, gasReport) {
   const tx = await txPromise;
   const receipt = await tx.wait();
@@ -104,6 +110,7 @@ async function buildCoreCode() {
     vrfVerifier: await creationCode("FRAINVRFVerifier"),
     vrfCoordinator: await creationCode("DAIOVRFCoordinator"),
     core: await creationCode("DAIOCore"),
+    coreProxy: await creationCode("DAIOTransparentUpgradeableProxy"),
     roundLedger: await creationCode("DAIORoundLedger")
   };
 }
@@ -170,7 +177,7 @@ async function main() {
   await runStage(
     systemDeployer,
     "deployCore",
-    systemDeployer.deployCore(treasury.address, 2, await buildCoreCode(), { gasLimit: 12_500_000 }),
+    systemDeployer.deployCore(treasury.address, 2, deployerAccount.address, await buildCoreCode(), { gasLimit: 13_500_000 }),
     deployed,
     gasReport
   );
@@ -208,6 +215,7 @@ async function main() {
   await runStage(systemDeployer, "wireAndTransfer", systemDeployer.wireAndTransfer(config), deployed, gasReport);
 
   const core = await ethers.getContractAt("DAIOCore", requireAddress(deployed, "DAIOCore"));
+  deployed.DAIOCoreProxyAdmin = await proxyAdminAddress(await core.getAddress());
   const infoReader = await deployContract("DAIOInfoReader", await core.getAddress());
   deployed.DAIOInfoReader = await infoReader.getAddress();
   const paymentRouter = await ethers.getContractAt("PaymentRouter", requireAddress(deployed, "PaymentRouter"));

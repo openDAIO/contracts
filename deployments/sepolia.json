@@ -1,0 +1,41 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "status": "complete",
+  "contracts": {
+    "USDAIO": "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
+    "StakeVault": "0xcD72B9D839Bc4058774AA16a4139339fA15BEc3e",
+    "ReviewerRegistry": "0x29CC861e715DeAC7D7C83A691EDf682D5c88dd5F",
+    "AssignmentManager": "0x838b8aeDd90e231e8355eFb186494671bf9ff16C",
+    "ConsensusScoring": "0xEf348E9658087F7F459dE35207EF02bEb6923aaE",
+    "Settlement": "0x6026EAff802C542e0530F234dbCB1738CAb2b6f1",
+    "ReputationLedger": "0x6099D8C70B4F0F43BdC8b8D1C5Aa58C1FFfab265",
+    "DAIOCommitRevealManager": "0xf79dcfEf2b09d29179045B1a2E3D5aa8f62fFCA1",
+    "DAIOPriorityQueue": "0xfDd5b220E542Fae4da00A006cEE19E2B32B865f6",
+    "FRAINVRFVerifier": "0x0ce2B64d1321c4C3033223863C52533Da32C18b7",
+    "DAIOVRFCoordinator": "0x891aa574C0B226E6860A9778BeDb1ef6Ea1639Ea",
+    "DAIOCoreImplementation": "0xaAF48c03bA49921A920C6e96DBC29C9421618a1E",
+    "DAIOCoreProxyAdmin": "0x0732c2ACAe0b14da8FbD56F32E3900e885EAf9C5",
+    "DAIOCore": "0x47aC6B98bB2B408954CD72b1B3Adc5A3f5856B26",
+    "DAIORoundLedger": "0xC02ec80De42917A25f279BF1c715c59459C1CD86",
+    "DAIOInfoReader": "0x37338aBC72f328569F8E399EA4b4e8eB0030CD40",
+    "ENSVerifier": "0xdB7F67EA1284C05EC9E42B364e9FfD8439E89A33",
+    "ERC8004Adapter": "0x200eB6bF1af5936142A8aD3B6293fD159BF43916",
+    "AcceptedTokenRegistry": "0xe5E8574D93dAda254bcae37510A95Ad28a0F658a",
+    "UniswapV4SwapAdapter": "0xCDcAFCC67dfe96BF4bc3E92623b75bc28706558B",
+    "PaymentRouter": "0x59154659635eA0f743f57e0f1A46f8985266634a",
+    "DAIOAutoConvertHook": "0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040"
+  },
+  "deployedAtBlock": 10779910,
+  "deployer": "0x2f149CaA0e931e13f6F32bd3E46eFc6e96bcC36A",
+  "uniswapV4EthUsdaioPool": {
+    "currency0": "0x0000000000000000000000000000000000000000",
+    "currency1": "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "hook": "0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040",
+    "poolKeyHash": "0x83bc140eb451dfc175b8a2f9e5631eb13d3a5760475fad8f3bc916dfb616faff",
+    "status": "reused"
+  },
+  "finalizedAtBlock": 10779946
+}

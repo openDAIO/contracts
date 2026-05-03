@@ -28,8 +28,39 @@ function requireEnv(env, name) {
   return env[name];
 }
 
-function addressEnv(env, name) {
-  return ethers.getAddress(requireEnv(env, name));
+function deploymentAddresses(env) {
+  if (env.DAIO_DEPLOYMENT_FILE) {
+    const deployment = JSON.parse(fs.readFileSync(env.DAIO_DEPLOYMENT_FILE, "utf8"));
+    const contracts = deployment.contracts || deployment;
+    return {
+      usdaio: contracts.USDAIO,
+      stakeVault: contracts.StakeVault,
+      reviewerRegistry: contracts.ReviewerRegistry,
+      core: contracts.DAIOCore,
+      paymentRouter: contracts.PaymentRouter,
+      acceptedTokenRegistry: contracts.AcceptedTokenRegistry,
+      erc8004Adapter: contracts.ERC8004Adapter || ZERO
+    };
+  }
+
+  return {
+    usdaio: env.DAIO_USDAIO_ADDRESS,
+    stakeVault: env.DAIO_STAKE_VAULT_ADDRESS,
+    reviewerRegistry: env.DAIO_REVIEWER_REGISTRY_ADDRESS,
+    core: env.DAIO_CORE_ADDRESS,
+    paymentRouter: env.DAIO_PAYMENT_ROUTER_ADDRESS,
+    acceptedTokenRegistry: env.DAIO_ACCEPTED_TOKEN_REGISTRY_ADDRESS,
+    erc8004Adapter: env.DAIO_ERC8004_ADAPTER_ADDRESS || ZERO
+  };
+}
+
+function requireDeploymentAddresses(addresses) {
+  for (const [name, address] of Object.entries(addresses)) {
+    if (!address || !ethers.isAddress(address)) {
+      throw new Error(`${name} deployment address is required; set DAIO_DEPLOYMENT_FILE or DAIO_*_ADDRESS env vars`);
+    }
+  }
+  return Object.fromEntries(Object.entries(addresses).map(([name, address]) => [name, ethers.getAddress(address)]));
 }
 
 function vrfPublicKey(privateKey) {
@@ -110,15 +141,7 @@ async function main() {
   const stake = ethers.parseEther(env.DAIO_SETUP_REVIEWER_STAKE || "1000");
   const requesterUsdaio = ethers.parseEther(env.DAIO_SETUP_REQUESTER_USDAIO || "1000");
 
-  const addresses = {
-    usdaio: addressEnv(env, "DAIO_USDAIO_ADDRESS"),
-    stakeVault: addressEnv(env, "DAIO_STAKE_VAULT_ADDRESS"),
-    reviewerRegistry: addressEnv(env, "DAIO_REVIEWER_REGISTRY_ADDRESS"),
-    core: addressEnv(env, "DAIO_CORE_ADDRESS"),
-    paymentRouter: addressEnv(env, "DAIO_PAYMENT_ROUTER_ADDRESS"),
-    acceptedTokenRegistry: addressEnv(env, "DAIO_ACCEPTED_TOKEN_REGISTRY_ADDRESS"),
-    erc8004Adapter: env.DAIO_ERC8004_ADAPTER_ADDRESS ? ethers.getAddress(env.DAIO_ERC8004_ADAPTER_ADDRESS) : ZERO
-  };
+  const addresses = requireDeploymentAddresses(deploymentAddresses(env));
 
   const usdaio = await ethers.getContractAt("USDAIOToken", addresses.usdaio, deployer);
   const reviewerRegistry = await ethers.getContractAt("ReviewerRegistry", addresses.reviewerRegistry, deployer);
@@ -175,6 +198,15 @@ async function main() {
   }
 
   const registeredReviewers = await reviewerRegistry.getReviewers();
+  for (const agent of agents) {
+    const reviewer = await reviewerRegistry.getReviewer(agent.address);
+    const registered = reviewer.registered ?? reviewer[0];
+    const active = reviewer.active ?? reviewer[1];
+    const currentStake = reviewer.stake ?? reviewer[4];
+    if (!registered || !active || currentStake < stake) {
+      throw new Error(`Agent ${agent.index} reviewer registration is incomplete`);
+    }
+  }
   console.log("requester", requester.address);
   console.log("relayer", relayer.address);
   console.log("registeredReviewers", registeredReviewers.join(","));
