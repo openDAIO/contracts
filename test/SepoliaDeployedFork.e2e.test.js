@@ -7,7 +7,7 @@ const BN = require("bn.js");
 const RUN_DEPLOYED_FORK = process.env.RUN_SEPOLIA_DEPLOYED_FORK === "true";
 const describeDeployedFork = RUN_DEPLOYED_FORK ? describe : describe.skip;
 const FORK_URL = process.env.SEPOLIA_RPC_URL || process.env.HARDHAT_FORK_URL || "https://sepolia.drpc.org";
-const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10778505");
+const FORK_BLOCK = Number(process.env.SEPOLIA_FORK_BLOCK || "10778775");
 
 const DEPLOYER = "0x2f149CaA0e931e13f6F32bd3E46eFc6e96bcC36A";
 const DOMAIN_RESEARCH = 1;
@@ -63,25 +63,25 @@ const SEPOLIA = {
 };
 
 const DEPLOYED = {
-  usdaio: "0x3bB1A142b5abE17e5B2e577fa83b5247b6532606",
-  stakeVault: "0x9b790bf0bB552716dc8d3234DFf3e4a3A5a6a8F8",
-  reviewerRegistry: "0x7e7Ea105168dd18293dC128eA43b3d1BE0000686",
-  assignmentManager: "0xA77B2A24474F839616D9a1696D53861C8029E306",
-  consensusScoring: "0xfEa92280128c4dc6d658F1D18b38019336ae452d",
-  settlement: "0xde10633fEa33c0f56919d9eFa632294Bde6AA5A1",
-  reputationLedger: "0xBe13def9be39A5235FEDAa1571296f3C384258Be",
-  commitReveal: "0xBd2f6A66f4AD5162aE3eb564119C8325A660CD02",
-  priorityQueue: "0x4e7179a751F09e643f27CAD157BF40d5e9915c79",
-  vrfVerifier: "0x5E43cE1E1dE9a7C041463C189aA5c2dC975C10df",
-  vrfCoordinator: "0x97dD41B2950C203bA75F0FD9189144047EF0B374",
-  core: "0x41D1570eA26561C381FC94e61d1381826F45cD4d",
-  roundLedger: "0x30D6A783716bC30aAF04cf1022d31627D00c6f9D",
-  erc8004Adapter: "0xF89d23b89f3c4C514b90073A36cc9618E127c0eA",
-  acceptedTokenRegistry: "0x449c80B3E923DB9CB8E2E592Ba3Ec5E4a19a49a7",
-  swapAdapter: "0x42dfA56F457aAcc6243931534C08E99DEA4f6866",
-  paymentRouter: "0x28e88241B4E887619E21869fDb835efD10B4bb80",
-  ensVerifier: "0x87B674Ec26F8F8001E2FCfB25a47a93746760cc1",
-  autoConvertHook: "0xc0f32B14f0529158dDceD48Bfd2558F0AB134040"
+  usdaio: "0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac",
+  stakeVault: "0x696353b3C6d0a28caeB03f81e45a689E1748b046",
+  reviewerRegistry: "0x2ffd200ad63495BB0a48DA1884dFc89885e921F6",
+  assignmentManager: "0x3a49B0841d0d3E5CF7d568DEF8dc5C76737a4c1b",
+  consensusScoring: "0x4a227FbD317Bd63167856d329D671b119D34aC67",
+  settlement: "0xf1b391EA8f186cabC14661d435598c6575a37c2D",
+  reputationLedger: "0x0285faDEa91a8972866FB2C7629d052634334293",
+  commitReveal: "0xC4E4334450c14ec84cb584cF0E3C31C5Dd9c7c72",
+  priorityQueue: "0x7FabFAfb2a7Af863c78210BC7d30C50068fC1447",
+  vrfVerifier: "0x95cCA6fBe796AE57CB90FD7c64559090EE1C752A",
+  vrfCoordinator: "0x48EC5F1faa38B0ce6aDCFBe19761c5Af16fdd72A",
+  core: "0x9E6ae12333bDDA51D2cB402B2CE8c62c7238fA00",
+  roundLedger: "0xEdFbf97a651a7A7dd6107104023DbAA793Df8bf5",
+  erc8004Adapter: "0xfFCc3C0205A6466623304bACa384d255e7C56814",
+  acceptedTokenRegistry: "0x3B141D644aD985798fBe838AcA7CB66DD586E60C",
+  swapAdapter: "0xE36F87DC3448d4f473af15E605A613A9eC0c6f5E",
+  paymentRouter: "0x2BD2611b4835307D223B1fD0d7C39eed1752C024",
+  ensVerifier: "0x3A3B10FD7A3cAF8D25A5Eef0Bb085BD980a71FE6",
+  autoConvertHook: "0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040"
 };
 
 function sortitionScore(phase, requestId, participant, subject, randomness) {

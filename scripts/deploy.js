@@ -377,9 +377,16 @@ async function main() {
   const expectedReviewers = envUint("DAIO_EXPECTED_REVIEWER_COUNT", DEFAULT_EXPECTED_REVIEWERS);
   if (expectedReviewers < DEFAULT_EXPECTED_REVIEWERS) throw new Error("DAIO_EXPECTED_REVIEWER_COUNT should be at least 5 for this deployment profile");
 
-  const USDAIO = await ethers.getContractFactory("USDAIOToken");
-  const usdaio = await USDAIO.deploy(deployer.address);
-  await usdaio.waitForDeployment();
+  const reusableUsdaioAddress = envAddress("REUSE_USDAIO_ADDRESS") || envAddress("EXISTING_USDAIO_ADDRESS");
+  let usdaio;
+  if (reusableUsdaioAddress) {
+    if ((await ethers.provider.getCode(reusableUsdaioAddress)) === "0x") throw new Error("REUSE_USDAIO_ADDRESS has no code");
+    usdaio = await ethers.getContractAt("USDAIOToken", reusableUsdaioAddress);
+  } else {
+    const USDAIO = await ethers.getContractFactory("USDAIOToken");
+    usdaio = await USDAIO.deploy(deployer.address);
+    await usdaio.waitForDeployment();
+  }
 
   const StakeVault = await ethers.getContractFactory("StakeVault");
   const stakeVault = await StakeVault.deploy(await usdaio.getAddress());
@@ -530,11 +537,19 @@ async function main() {
     await confirm(swapAdapter.setPaymentRouter(await paymentRouter.getAddress()));
 
     if (poolManagerAddress && envBool("ENABLE_AUTO_CONVERT_HOOK", isSepolia)) {
-      autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
+      const reusableHookAddress = envAddress("REUSE_AUTO_CONVERT_HOOK_ADDRESS") || envAddress("EXISTING_AUTO_CONVERT_HOOK_ADDRESS");
+      if (reusableHookAddress) {
+        if ((await ethers.provider.getCode(reusableHookAddress)) === "0x") throw new Error("REUSE_AUTO_CONVERT_HOOK_ADDRESS has no code");
+        autoConvertHook = await ethers.getContractAt("DAIOAutoConvertHook", reusableHookAddress);
+        if ((await autoConvertHook.usdaio()) !== await usdaio.getAddress()) throw new Error("Reused hook USDAIO mismatch");
+        await confirm(autoConvertHook.setPaymentRouter(await paymentRouter.getAddress()));
+      } else {
+        autoConvertHook = await deployHookWithCreate2(poolManagerAddress, await paymentRouter.getAddress(), await usdaio.getAddress());
+      }
       await confirm(autoConvertHook.setIntentWriter(await swapAdapter.getAddress(), true));
       await confirm(autoConvertHook.setAllowedRouter(universalRouterAddress, true));
       await confirm(swapAdapter.setAutoConvertHook(await autoConvertHook.getAddress()));
-      if (envBool("CONFIGURE_V4_ETH_USDAIO_POOL", isSepolia)) {
+      if (!reusableHookAddress && envBool("CONFIGURE_V4_ETH_USDAIO_POOL", isSepolia)) {
         v4PoolConfig = await configureV4EthUsdaioPool({
           deployer,
           usdaio,
