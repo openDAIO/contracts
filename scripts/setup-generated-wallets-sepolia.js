@@ -139,6 +139,7 @@ async function main() {
   const [deployer] = await ethers.getSigners();
   const minEth = ethers.parseEther(env.DAIO_SETUP_MIN_ETH || "0.01");
   const stake = ethers.parseEther(env.DAIO_SETUP_REVIEWER_STAKE || "1000");
+  const metadataRefreshStake = BigInt(env.DAIO_SETUP_METADATA_REFRESH_STAKE_WEI || "1");
   const requesterUsdaio = ethers.parseEther(env.DAIO_SETUP_REQUESTER_USDAIO || "1000");
 
   const addresses = requireDeploymentAddresses(deploymentAddresses(env));
@@ -164,6 +165,8 @@ async function main() {
       index,
       wallet,
       address: ethers.getAddress(requireEnv(env, `DAIO_AGENT_${index}_ADDRESS`)),
+      ensName: env[`DAIO_AGENT_${index}_ENS_NAME`] || "",
+      ensNode: env[`DAIO_AGENT_${index}_ENS_NAME`] ? ethers.namehash(env[`DAIO_AGENT_${index}_ENS_NAME`]) : ethers.ZeroHash,
       agentId: BigInt(env[`DAIO_AGENT_${index}_AGENT_ID`] || "0"),
       privateKey
     };
@@ -184,16 +187,31 @@ async function main() {
     const reviewer = await reviewerRegistry.getReviewer(agent.address);
     const registered = reviewer.registered ?? reviewer[0];
     const currentStake = reviewer.stake ?? reviewer[4];
+    const currentAgentId = reviewer.agentId ?? reviewer[3];
+    const currentEnsNode = reviewer.ensNode ?? reviewer[10];
+    const currentEnsName = reviewer.ensName ?? reviewer[11];
+    const agentId = await usableAgentId(erc8004Adapter, agent);
     if (!registered) {
-      const agentId = await usableAgentId(erc8004Adapter, agent);
       await confirm(
         reviewerRegistry
           .connect(agent.wallet)
-          .registerReviewer("", ethers.ZeroHash, agentId, DOMAIN_RESEARCH, vrfPublicKey(agent.privateKey), stake, { gasLimit: 500_000 }),
+          .registerReviewer(agent.ensName, agent.ensNode, agentId, DOMAIN_RESEARCH, vrfPublicKey(agent.privateKey), stake, { gasLimit: 500_000 }),
         `registerReviewer agent${agent.index}`
       );
     } else if (currentStake < stake) {
       await confirm(reviewerRegistry.connect(agent.wallet).addStake(stake - currentStake, { gasLimit: 150_000 }), `topUpStake agent${agent.index}`);
+    }
+
+    const metadataChanged = currentAgentId !== agentId || currentEnsNode !== agent.ensNode || currentEnsName !== agent.ensName;
+    if (registered && metadataChanged) {
+      await ensureTokenBalance(usdaio, agent.address, metadataRefreshStake, `agent${agent.index}:metadata`);
+      await ensureAllowance(usdaio, agent.wallet, addresses.stakeVault, metadataRefreshStake, `agent${agent.index}->StakeVault:metadata`);
+      await confirm(
+        reviewerRegistry
+          .connect(agent.wallet)
+          .registerReviewer(agent.ensName, agent.ensNode, agentId, DOMAIN_RESEARCH, vrfPublicKey(agent.privateKey), metadataRefreshStake, { gasLimit: 500_000 }),
+        `refreshReviewerMetadata agent${agent.index}`
+      );
     }
   }
 

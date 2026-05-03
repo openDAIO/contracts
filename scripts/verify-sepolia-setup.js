@@ -123,11 +123,22 @@ async function main() {
   expectEqual(registeredReviewers.length.toString(), expectedReviewers.length.toString(), "registered reviewer count");
   for (const reviewerAddress of expectedReviewers) {
     expectTruthy(registeredReviewers.includes(reviewerAddress), `${reviewerAddress} enumerated`);
+    const index = expectedReviewers.indexOf(reviewerAddress) + 1;
+    const expectedEnsName = env[`DAIO_AGENT_${index}_ENS_NAME`] || "";
+    const expectedEnsNode = expectedEnsName ? ethers.namehash(expectedEnsName) : ethers.ZeroHash;
+    const expectedAgentId = BigInt(env[`DAIO_AGENT_${index}_AGENT_ID`] || "0");
     const reviewer = await reviewerRegistry.getReviewer(reviewerAddress);
     expectTruthy(reviewer.registered, `${reviewerAddress} registered`);
     expectTruthy(reviewer.active, `${reviewerAddress} active`);
     expectTruthy(!reviewer.suspended, `${reviewerAddress} not suspended`);
-    expectTruthy(reviewer.stake >= minStake, `${reviewerAddress} stake`);
+    const agentId = reviewer.agentId ?? reviewer[3];
+    const stake = reviewer.stake ?? reviewer[4];
+    const ensNode = reviewer.ensNode ?? reviewer[10];
+    const ensName = reviewer.ensName ?? reviewer[11];
+    expectEqual(agentId.toString(), expectedAgentId.toString(), `${reviewerAddress} agentId`);
+    expectEqual(ensName, expectedEnsName, `${reviewerAddress} ensName`);
+    expectEqual(ensNode, expectedEnsNode, `${reviewerAddress} ensNode`);
+    expectTruthy(stake >= minStake, `${reviewerAddress} stake`);
     expectTruthy(await usdaio.allowance(reviewerAddress, contracts.StakeVault) >= minStake, `${reviewerAddress} StakeVault allowance`);
   }
 
