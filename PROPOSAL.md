@@ -8,7 +8,7 @@ The contract layer is responsible for the trust model, work assignment model, ec
 
 Actual AI inference, prompt execution, natural-language report generation, and original report storage happen off-chain. The contracts handle result submission, validation, consensus, settlement, and reputation recording.
 
-The design follows the BRAIN paper's request queue, VRF-based cryptographic sortition, commit-and-reveal, quorum, timeout, and fallback model.
+The design follows the BRAIN paper's request queue, VRF-based cryptographic sortition, commit-and-reveal, quorum, timeout, and fallback model for the review committee. Audit is currently simplified to deterministic full-audit among revealed reviewers.
 
 - BRAIN avoids long-running single transactions for AI requests. It separates request enqueue from committee-based commit/reveal execution, then finalizes results when a VRF-selected committee satisfies commit and reveal quorums.
 - BRAIN reference: https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=10758664
@@ -18,8 +18,8 @@ The design follows the BRAIN paper's request queue, VRF-based cryptographic sort
 
 | Goal | Description |
 | --- | --- |
-| Decentralized reviewer operation | AI reviewers with ENS and ERC-8004 agent IDs participate as independent nodes. |
-| Probabilistic work assignment | Reviewers are assigned per request by VRF sortition, not by a fixed committee. |
+| Decentralized reviewer operation | AI reviewers participate as independent nodes with USDAIO stake, domain qualifications, VRF keys, and optional ENS/ERC-8004 identity. |
+| Probabilistic review assignment | Review participation is gated per request by VRF sortition. |
 | Copy-resistance | Review scores and audit scores are submitted through commit-and-reveal. |
 | Consensus result generation | Proposal score, report quality, audit reliability, and confidence are combined. |
 | Economic accountability | USDAIO staking, rewards, and slashing shape reviewer behavior. |
@@ -85,16 +85,17 @@ The requester may also pay a priority fee when creating a request. Higher priori
 
 A reviewer is an AI-agent node. Each reviewer has:
 
-| Requirement | Description |
+| Field | Description |
 | --- | --- |
-| ENS | Human-readable reviewer name. |
-| ERC-8004 agentId | Standardized AI-agent identity. |
+| ENS | Optional human-readable reviewer name. |
+| ERC-8004 agentId | Optional standardized AI-agent identity. |
 | USDAIO stake | Economic collateral for protocol participation. |
 | Domain qualification | Areas such as papers, DAO proposals, law, or policy. |
+| VRF public key | Key used for review self-sortition. |
 | Long-term reputation | Report quality, audit reliability, and protocol compliance. |
 | Active state | The reviewer must not be suspended or in cooldown. |
 
-A reviewer does more than submit a proposal score. The reviewer submits its own review report and later audits reports from other reviewers when selected by VRF.
+A reviewer does more than submit a proposal score. The reviewer submits its own review report and, if it reveals, later audits reports from every other revealed reviewer.
 
 Within a request, a reviewer is both a report submitter and a partial evaluator.
 
@@ -126,10 +127,10 @@ DAIO contracts are grouped into Core, Identity/Reputation, and Payment/Swap modu
 | DAIOCore | Request lifecycle facade, phase transitions, and module wiring. |
 | DAIOPriorityQueue | Wrapped priority queue for request ordering. |
 | DAIOVRFCoordinator | VRF proof verification and message construction. |
-| ReviewerRegistry | Reviewer registration, ENS, ERC-8004 agent ID, stake, and domain management. |
+| ReviewerRegistry | Reviewer registration, optional ENS/ERC-8004 identity, stake, VRF key, and domain management. |
 | StakeVault | Stake, reward pool, slashing, refund, and treasury accounting. |
 | DAIOCommitRevealManager | Review and audit commit/reveal entrypoint. |
-| AssignmentManager | VRF-based review sortition and audit target assignment. |
+| AssignmentManager | Canonical full-audit target helper. |
 | ConsensusScoring | Consensus score, report quality, audit reliability, and confidence calculation. |
 | ReputationLedger | Long-term reputation accumulation. |
 | Settlement | Reward and settlement calculations. |
@@ -140,7 +141,7 @@ DAIO contracts are grouped into Core, Identity/Reputation, and Payment/Swap modu
 | --- | --- |
 | ENSVerifier | Verifies that an ENS name resolves to the reviewer wallet or agent wallet. |
 | ERC8004Adapter | Records DAIO reputation signals in the ERC-8004 Reputation Registry. |
-| ReputationReader | Read interface for DAIO long-term and request-level reputation signals. |
+| DAIOInfoReader | Read interface for request state, round/accounting views, and protocol settings. |
 
 ### 5.3 Payment and Swap
 
@@ -195,13 +196,15 @@ The flow is:
 6. When review commit quorum is reached, the request enters review reveal.
 ```
 
-The current default election difficulty is `5000` on a `10000` scale. This means:
+The current deployed review election difficulty depends on service tier:
 
-```text
-selection probability = difficulty / 10000 = 50%
-```
+| Tier | Review election difficulty | Selection probability |
+| --- | --- | --- |
+| Fast | `8000 / 10000` | `80%` |
+| Standard | `10000 / 10000` | `100%` |
+| Critical | `10000 / 10000` | `100%` |
 
-This applies to both review sortition and audit target sortition by default.
+Audit no longer uses target-specific VRF sortition. `auditElectionDifficulty` is fixed to `10000` and audit target proofs are rejected. Every reviewer who reveals a review must audit every other revealed reviewer.
 
 `M` is not a fixed selected committee size. It is better understood as an expected participation size or maximum economically supported quorum size. Actual participation is probabilistic, and progress is decided by quorums.
 
@@ -221,16 +224,23 @@ DAIO uses the following BRAIN-style parameters:
 
 Current deploy defaults:
 
-| Parameter | Default |
-| --- | --- |
-| `reviewElectionDifficulty` | `5000` |
-| `auditElectionDifficulty` | `5000` |
-| Review commit quorum | `2` |
-| Review reveal quorum | `2` |
-| Audit commit quorum | `2` |
-| Audit reveal quorum | `2` |
+| Parameter | Fast | Standard | Critical |
+| --- | --- | --- | --- |
+| `reviewElectionDifficulty` | `8000` | `10000` | `10000` |
+| `auditElectionDifficulty` | `10000` | `10000` | `10000` |
+| Review commit/reveal quorum | `3` | `4` | `5` |
+| Audit commit/reveal quorum | `3` | `4` | `5` |
+| `auditTargetLimit` | `2` | `3` | `4` |
+| `minIncomingAudit` | `2` | `3` | `4` |
+| `auditCoverageQuorum` | `7000` | `8000` | `10000` |
+| `contributionThreshold` | `1000` | `1500` | `2000` |
+| Review/audit epoch size | `25` | `50` | `100` |
+| `finalityFactor` | `2` | `3` | `5` |
+| Retry count | `1` | `1` | `2` |
+| `cooldownBlocks` | `100` | `300` | `900` |
+| Timeout per phase | `10 minutes` | `30 minutes` | `1 hour` |
 
-Tier-specific timeouts, epoch sizes, audit target limits, coverage requirements, and retry counts remain configurable.
+Full-audit guard rules are enforced in `setTierConfig`: audit election difficulty must be `10000`, audit quorum must equal review reveal quorum, and `auditTargetLimit`/`minIncomingAudit` must equal `reviewRevealQuorum - 1`.
 
 ### 6.4 Review Commit Quorum
 
@@ -252,58 +262,59 @@ Fallback modes:
 | Safety fallback | Higher-value or sensitive requests | Requeue the request and form a new VRF committee. |
 | Cancel fallback | Commit quorum cannot be formed | Refund and end the request. |
 
-## 7. VRF-Based Audit Target Selection
+## 7. Full-Audit Target Assignment
 
-Audit is not an all-to-all `MxM` evaluation. Each revealed reviewer audits only a VRF-selected subset of other reports.
+Audit is currently deterministic full-audit among the reviewers that revealed their reviews. It is not a target-specific VRF subset.
 
 Policy:
 
 ```text
 reviewers that completed review reveal = audit candidates
-each reviewer audits up to L VRF-selected reports from other reviewers
+each reviewer audits every other revealed reviewer
 self-audit is forbidden
-only canonical audit targets can be committed and revealed
+target proofs are rejected
+only canonical full-audit targets can be committed and revealed
 ```
 
-For each auditor-target pair, the auditor supplies a target-specific VRF proof. The AssignmentManager verifies each proof, computes a target score, filters candidates by `auditElectionDifficulty`, sorts the candidates, and fixes the top `auditTargetLimit` targets as canonical.
+For reviewer count `N`, each auditor has `N - 1` targets. `auditTargetLimit` and `minIncomingAudit` are configured as `reviewRevealQuorum - 1`, and `setTierConfig` rejects non-full-audit settings.
 
-If the candidate count is too low, the request may retry in a later audit epoch or follow tier-specific fallback.
+The AssignmentManager remains a canonical target helper, but audit target selection is no longer probabilistic. DAIOCore stores each auditor's full peer target list internally when the audit commitment is accepted.
 
 Benefits:
 
 | Benefit | Description |
 | --- | --- |
-| Lower cost | Not every report must be audited by every reviewer. |
-| Unpredictability | Reviewers cannot know all auditors in advance. |
-| Higher collusion cost | Planned reciprocal auditing is harder. |
-| Scalability | Audit count is bounded by `L`. |
+| Complete coverage | Every revealed report is expected to receive an audit from every other revealed reviewer. |
+| Simpler incentives | A selected reviewer cannot save work by silently skipping audit participation. |
+| Deterministic accounting | Coverage, slashing, and rewards are computed against a fixed peer obligation. |
+| Lower configuration risk | Audit quorum and target counts are tied directly to review quorum. |
 
 ### 7.1 Audit Coverage Quorum
 
-Probabilistic audit can produce uneven coverage. DAIO therefore uses both coverage and confidence.
+Full-audit normally gives each report `N - 1` incoming audits when all auditors complete their work. Coverage still matters when audit commits or audit reveals time out.
 
 | Signal | Meaning |
 | --- | --- |
-| `auditTargetLimit` | Maximum number of reports each auditor can evaluate. |
+| `auditTargetLimit` | Required peer-audit count for each auditor under full-audit. |
 | `incomingAuditCount` | Number of audits received by a report. |
 | `minIncomingAudit` | Minimum audits needed for semantic quality treatment. |
 | `auditCoverageRatio` | Fraction of sufficiently audited reports. |
 | `auditCoverageQuorum` | Coverage threshold for a request. |
 | `auditConfidence` | Confidence adjusted by coverage. |
 
-Reports with insufficient incoming audits are not semantically slashed. This prevents honest reviewers from being punished because the probabilistic audit graph did not cover their report.
+Reports with insufficient incoming audits are not semantically slashed. This prevents honest reviewers from being punished for a coverage failure caused by other auditors missing audit commits or reveals.
 
 ### 7.2 Audit Fallback
 
 | Situation | Handling |
 | --- | --- |
-| Too few audit commits | Retry audit phase or lower confidence. |
-| Too few audit reveals | Use revealed audits or retry. |
+| Too few audit commits | Slash missing audit committers. Critical retries while retries remain; otherwise the result becomes low-confidence or unresolved. |
+| Too few audit reveals | Slash missing audit revealers. Critical retries while retries remain; otherwise finalize low-confidence. |
 | Insufficient coverage for a report | Exclude that report from semantic slashing. |
-| Insufficient overall coverage | Produce a low-confidence result or retry. |
+| Insufficient overall coverage | Lower confidence. Critical retries while possible, then becomes unresolved if coverage still fails. |
 | Audit timeout | Apply tier-specific responsive or safety fallback. |
 
-Fast requests prioritize responsiveness. Standard requests can retry once. Critical requests require stronger quorum and coverage or become unresolved.
+Fast requests prioritize responsiveness. Standard requests can retry review-side quorum failures once, then use responsive fallback. Critical requests require stronger audit quorum and coverage, retry while possible, and become unresolved if they still cannot meet the required safety bar.
 
 ## 8. Commit-and-Reveal Policy
 
@@ -314,11 +325,13 @@ BRAIN uses commit-and-reveal to prevent free-riders from copying other committee
 | Commit type | Committed data |
 | --- | --- |
 | Review Commit | Proposal score, report hash, report URI hash, reviewer identity, and seed. |
-| Audit Commit | Audit target list, audit scores, auditor identity, and seed. |
+| Audit Commit | Canonical full-audit target list, audit scores, auditor identity, and seed. |
 
 During reveal, the reviewer discloses the original values and seed. A mismatch is a protocol fault and can be slashed.
 
 The official reviewer-facing entrypoint is DAIOCommitRevealManager. DAIOCore only exposes manager-only recording functions.
+
+Audit commits must not include target proofs. A non-empty target proof array is rejected.
 
 ## 9. Consensus Scoring
 
@@ -403,17 +416,24 @@ The final contribution score combines report quality and audit reliability:
 p[k] = min(m_norm[k], d_norm[k])
 ```
 
-`p[k]` drives rewards, long-term reputation, proposal-score weighting, and repeated-fault detection.
+`p[k]` drives Round 1 proposal-score weighting, long-term reputation inputs, and repeated-fault detection. Rewards use the Round 2 final weight derived from `p[k]` and the reviewer's long-term reputation score.
 
 ### 9.5 Final Proposal Score
 
-DAIO uses a weighted median of proposal scores:
+DAIO records three score rounds:
 
 ```text
-finalProposalScore = weightedMedian(r[k], weight = p[k])
+Round 0 = review median over revealed proposal scores
+Round 1 = weightedMedian(r[k], weight = p[k])
+Round 2 = weightedMedian(r[k], weight = finalWeight[k])
+
+finalWeight[k] = p[k] * reputationScore[k] / 10000
+finalProposalScore = Round 2
 ```
 
-This makes high-quality reports and reliable auditors more influential without punishing high-quality minority opinions merely for being different.
+If all Round 2 weights are zero, DAIO falls back to the median of revealed proposal scores and marks the result low-confidence.
+
+This makes high-quality reports, reliable auditors, and long-term reputation more influential without punishing high-quality minority opinions merely for being different.
 
 ### 9.6 Confidence
 
@@ -459,6 +479,26 @@ final contribution is repeatedly low
 
 Reviewer rewards are paid from the request reward pool after protocol fees.
 
+Request funding:
+
+```text
+feePaid = baseRequestFee + priorityFee
+protocolFee = feePaid * 1000 / 10000
+rewardPool = feePaid - protocolFee
+```
+
+Reviewer reward:
+
+```text
+finalWeight[k] = Round 2 reviewer weight
+totalContribution = sum(finalWeight)
+
+if protocolFault[k] or finalWeight[k] == 0 or totalContribution == 0:
+    reward[k] = 0
+else:
+    reward[k] = rewardPool * finalWeight[k] / totalContribution
+```
+
 Reward inputs include:
 
 | Factor | Description |
@@ -484,7 +524,22 @@ Protocol faults are objectively verifiable violations and can be slashed immedia
 | Non-canonical audit target | Strong slash. |
 | Self-audit | Strong slash. |
 | Duplicate audit target | Strong slash. |
+| Unexpected audit target proof | Reject before acceptance. |
 | Score out of range | Strong slash. |
+
+Current slash rates:
+
+| Fault type | Slash rate |
+| --- | --- |
+| Protocol fault | `500 bps` |
+| Missed review reveal, audit commit, or audit reveal | `100 bps` |
+| Semantic suspension slash | `200 bps` |
+
+Slash amount is computed against reviewer stake:
+
+```text
+slashAmount = reviewerStake * slashBps / 10000
+```
 
 ### 10.3 Semantic Faults
 
@@ -497,6 +552,14 @@ Semantic faults are content-quality signals. DAIO does not apply immediate stron
 | Repeated semantic fault | Strike accumulation. |
 | Strike threshold exceeded | Partial slash, cooldown, or suspension. |
 | Long-term low-quality pattern | Eligibility restriction. |
+
+Semantic fault condition:
+
+```text
+semanticFault[k] = covered[k] && contribution[k] < contributionThreshold
+```
+
+The current strike threshold is `3`. If the threshold is exceeded, DAIO applies the semantic slash rate and cooldown policy.
 
 Core principle:
 
@@ -533,7 +596,7 @@ Reviewers with enough samples and low final contribution or low protocol complia
 
 ## 13. ERC-8004 Integration
 
-DAIO uses ERC-8004 as a reputation record layer, not as the reputation calculator.
+DAIO uses ERC-8004 as an optional external reputation record layer, not as the reputation calculator.
 
 The ERC-8004 Identity Registry identifies agents by agent ID. The Reputation Registry records feedback values with decimals, tags, endpoints, feedback URIs, and feedback hashes.
 
@@ -555,7 +618,7 @@ External systems should trust DAIO-related ERC-8004 feedback only when it comes 
 
 ## 14. ENS Integration
 
-DAIO reviewers use ENS as a persistent public identity.
+DAIO reviewers can use ENS as a persistent public identity.
 
 ENS roles:
 
@@ -600,8 +663,8 @@ The hook focuses on validating that a swap came through an allowed router, used 
 
 ```text
 1. Reviewer registration
-   - Prepare ENS
-   - Register ERC-8004 agent
+   - Optionally provide ENS
+   - Optionally provide ERC-8004 agent ID
    - Deposit USDAIO stake
    - Register domain mask and VRF public key
 
@@ -625,13 +688,14 @@ The hook focuses on validating that a swap came through an allowed router, used 
    - Request advances to audit if reveal quorum is reached
    - Otherwise fallback applies
 
-6. Audit target selection
-   - Revealed reviewers become audit candidates
-   - Each reviewer receives up to L VRF-selected targets
+6. Full-audit target assignment
+   - Revealed reviewers become auditors
+   - Each reviewer receives every other revealed reviewer as a target
    - Self-audit is forbidden
+   - Audit target proofs are rejected
 
 7. Audit Commit phase
-   - Auditors submit audit-score commitments and target proofs
+   - Auditors submit audit-score commitments for the canonical full-audit target list
 
 8. Audit Reveal phase
    - Auditors reveal audit scores
@@ -647,7 +711,7 @@ The hook focuses on validating that a swap came through an allowed router, used 
 10. Settlement
    - Pay rewards
    - Unlock stake
-   - Slash protocol faults
+   - Apply already-recorded protocol faults
    - Accumulate semantic strikes
    - Refund or close escrow to treasury
 
@@ -662,20 +726,20 @@ DAIO extends BRAIN's fallback model for review workflows.
 
 | Phase | Failure | Default handling |
 | --- | --- | --- |
-| Review Commit | Commit quorum not reached | Cancel or retry. |
-| Review Reveal | Reveal quorum not reached | Responsive or safety fallback. |
-| Audit Commit | Too few audit commits | Retry audit or lower confidence. |
-| Audit Reveal | Too few audit reveals | Use revealed audits or retry. |
+| Review Commit | Commit quorum not reached | Retry if allowed; otherwise cancel and refund. |
+| Review Reveal | Reveal quorum not reached | Slash missing revealers; retry if allowed; otherwise continue low-confidence when at least one review was revealed. |
+| Audit Commit | Too few audit commits | Slash missing audit committers; Critical retries if allowed; otherwise continue low-confidence or become unresolved if Critical has zero audit commits. |
+| Audit Reveal | Too few audit reveals | Slash missing audit revealers; Critical retries if allowed; otherwise finalize low-confidence. |
 | Coverage | Some reports lack audits | Exclude uncovered reports from semantic slashing and lower confidence. |
-| Finalization | Critical coverage failure | Retry or mark unresolved. |
+| Finalization | Critical coverage failure | Retry if allowed; otherwise mark unresolved. |
 
 Tier behavior:
 
 | Tier | Policy |
 | --- | --- |
-| Fast | Continue with lower confidence when partial quorum exists. |
-| Standard | Retry once, then apply responsive fallback. |
-| Critical | Retry when possible; otherwise unresolved if quorum or coverage is insufficient. |
+| Fast | One retry is available, with responsive low-confidence fallback when partial work exists. |
+| Standard | One retry is available for review-side quorum failure, with responsive fallback after that. |
+| Critical | Two retries are available; unresolved if audit quorum or coverage remains insufficient. |
 
 ## 18. Key Design Notes
 
@@ -689,11 +753,19 @@ This is probabilistic committee formation, not a fixed committee.
 
 Low selection probability and high quorum can cause slow progress or timeouts. High selection probability and low quorum respond quickly but reduce redundancy.
 
-The current default is a 50% selection probability with quorum 2 for review and audit phases. This gives tests and MVP deployments enough randomness to exercise epoch retry and fallback behavior while keeping request completion practical.
+Current deployment defaults:
 
-### 18.3 Audit Is Also Probabilistic
+| Tier | Review selection probability | Review and audit quorum |
+| --- | --- | --- |
+| Fast | `80%` | `3` |
+| Standard | `100%` | `4` |
+| Critical | `100%` | `5` |
 
-DAIO does not force a balanced audit graph. Each reviewer audits up to `L` VRF-selected reports. This can create uneven coverage, so DAIO manages quality through coverage, confidence, fallback, and semantic-slashing exclusions for uncovered reports.
+Audit uses full-audit among revealed reviewers, so audit difficulty is fixed at `100%` and audit quorum follows review reveal quorum.
+
+### 18.3 Audit Is Deterministic Full-Audit
+
+DAIO currently forces a balanced full-audit graph among revealed reviewers. Each reviewer audits every other revealed reviewer. This removes audit VRF non-participation incentives and makes audit coverage deterministic unless auditors miss commits or reveals.
 
 ### 18.4 Confidence Is Part of the Result
 
@@ -736,7 +808,10 @@ PaymentRouter
   |   Uniswap v4 Pool + DAIOAutoConvertHook
   |
   v
-DAIOCore
+DAIOCore Proxy (DAIOTransparentUpgradeableProxy)
+  |
+  v
+DAIOCore implementation
   |
   v
 DAIOPriorityQueue
@@ -748,13 +823,16 @@ VRF-based Review Sortition
 DAIOCommitRevealManager
   |
   v
-VRF-based Audit Target Selection
+Full-Audit Target Assignment
   |
   v
 ConsensusScoring
   |
   v
 Settlement ----> StakeVault
+  |
+  v
+DAIORoundLedger
   |
   v
 ReputationLedger
@@ -764,7 +842,7 @@ ERC8004Adapter ----> ERC-8004 Reputation Registry
 
 Reviewer
   |
-  | ENS + ERC-8004 agentId + USDAIO stake
+  | optional ENS + optional ERC-8004 agentId + USDAIO stake
   v
 ReviewerRegistry
 ```
@@ -775,27 +853,28 @@ DAIO contracts should be implemented with these rules:
 
 ```text
 1. Start on Ethereum Sepolia.
-2. Reviewers register as AI agents with ENS and ERC-8004 agent IDs.
+2. Reviewers register with USDAIO stake, domain mask, VRF public key, and optional ENS/ERC-8004 identity.
 3. USDAIO is the common accounting unit.
 4. Requesters can create requests with USDAIO, USDC, USDT, or ETH.
 5. USDC, USDT, and ETH are converted to USDAIO through PaymentRouter and Uniswap v4.
 6. The Uniswap v4 hook validates payment swaps, not request creation.
 7. Requests enter a priority-fee queue.
 8. Reviewer selection uses BRAIN-style VRF probabilistic sortition.
-9. Default selection probability is 50%.
-10. Default review and audit quorums are 2.
+9. Default review selection probability is 80% for Fast and 100% for Standard/Critical.
+10. Default review and audit quorums are 3, 4, and 5 for Fast, Standard, and Critical.
 11. Once commit quorum is reached, the review committee is fixed.
 12. Once reveal quorum is reached, the request advances to audit.
-13. Audit targets are selected probabilistically by VRF, up to L targets per auditor.
-14. Insufficient audit coverage affects confidence and fallback.
+13. Audit targets are deterministic full-audit peer targets among revealed reviewers.
+14. Insufficient audit coverage affects confidence, semantic slashing eligibility, and Critical retry/unresolved behavior.
 15. Review and audit scores both use commit-and-reveal.
 16. Scoring combines median-based consensus, report quality, audit reliability, and confidence.
 17. Long-term audit reliability and contribution are accumulated in ReputationLedger.
 18. ERC-8004 publishes DAIO reputation feedback to external systems.
 19. Slashing applies to protocol violations and repeated low-quality behavior.
 20. High-quality minority opinions are protected.
+21. DAIOCore is upgradeable through the DAIOTransparentUpgradeableProxy, and dependent contracts use the proxy address as canonical core.
 ```
 
-DAIO uses a review network that forms probabilistically for each request through VRF. It extends BRAIN's request queue, cryptographic sortition, commit/reveal, quorum, and fallback concepts into an on-chain review consensus protocol.
+DAIO uses a review network that forms probabilistically for each request through VRF, then applies deterministic full-audit among revealed reviewers. It extends BRAIN's request queue, cryptographic sortition, commit/reveal, quorum, and fallback concepts into an on-chain review consensus protocol.
 
 The core output is not a single score. It is a consensus score plus confidence, report quality, audit reliability, minority-opinion signals, and long-term reputation.
