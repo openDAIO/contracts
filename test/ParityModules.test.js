@@ -10,12 +10,12 @@ const REVIEW_COMMIT = 2n;
 function tierConfig() {
   return {
     reviewElectionDifficulty: 5000,
-    auditElectionDifficulty: 5000,
+    auditElectionDifficulty: 10000,
     reviewCommitQuorum: 2,
     reviewRevealQuorum: 2,
     auditCommitQuorum: 2,
     auditRevealQuorum: 2,
-    auditTargetLimit: 2,
+    auditTargetLimit: 1,
     minIncomingAudit: 1,
     auditCoverageQuorum: 7000,
     contributionThreshold: 1000,
@@ -463,7 +463,7 @@ describe("PROPOSAL parity modules", function () {
   });
 
   it("exposes settings, progress, and submission details through DAIOInfoReader", async function () {
-    const { requester, alice, usdaio, stakeVault, reviewerRegistry, commitReveal, vrfPublicKey, vrfProof, core } =
+    const { requester, alice, bob, usdaio, stakeVault, reviewerRegistry, commitReveal, vrfPublicKey, vrfProof, core } =
       await deployCoreFixture();
     const { paymentRouter } = await deployPaymentFixture(usdaio, core);
     const DAIOInfoReader = await ethers.getContractFactory("DAIOInfoReader");
@@ -474,16 +474,21 @@ describe("PROPOSAL parity modules", function () {
       ...tierConfig(),
       reviewElectionDifficulty: 10000,
       auditElectionDifficulty: 10000,
-      reviewCommitQuorum: 1,
-      reviewRevealQuorum: 1,
-      auditCommitQuorum: 1,
-      auditRevealQuorum: 1
+      reviewCommitQuorum: 2,
+      reviewRevealQuorum: 2,
+      auditCommitQuorum: 2,
+      auditRevealQuorum: 2,
+      auditTargetLimit: 1,
+      minIncomingAudit: 1
     });
 
     const stake = ethers.parseEther("1000");
     await usdaio.mint(alice.address, stake);
     await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake);
     await reviewerRegistry.connect(alice).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
+    await usdaio.mint(bob.address, stake);
+    await usdaio.connect(bob).approve(await stakeVault.getAddress(), stake);
+    await reviewerRegistry.connect(bob).registerReviewer("", ethers.ZeroHash, 0, DOMAIN_RESEARCH, vrfPublicKey, stake);
 
     const required = await core.baseRequestFee();
     await usdaio.mint(requester.address, required);
@@ -498,7 +503,7 @@ describe("PROPOSAL parity modules", function () {
     expect(overview.requestCount).to.equal(1n);
 
     const fastConfig = await infoReader.tierConfig(FAST);
-    expect(fastConfig.reviewCommitQuorum).to.equal(1n);
+    expect(fastConfig.reviewCommitQuorum).to.equal(2n);
     expect(fastConfig.auditRevealTimeout).to.equal(30n * 60n);
 
     let requestInfo = await infoReader.requestInfo(1);
@@ -511,7 +516,7 @@ describe("PROPOSAL parity modules", function () {
     let phase = await infoReader.requestPhase(1);
     expect(phase.status).to.equal(REVIEW_COMMIT);
     expect(phase.count).to.equal(0n);
-    expect(phase.quorum).to.equal(1n);
+    expect(phase.quorum).to.equal(2n);
     expect(phase.timeout).to.equal(30n * 60n);
     expect(phase.processing).to.equal(true);
     expect(phase.completed).to.equal(false);
@@ -522,9 +527,15 @@ describe("PROPOSAL parity modules", function () {
     const seed = 123n;
     const resultHash = await commitReveal.hashReviewReveal(1, alice.address, score, reportHash, reportURI);
     await commitReveal.connect(alice).commitReview(1, resultHash, seed, vrfProof);
+    const bobReportHash = ethers.id("bob-report");
+    const bobReportURI = "ipfs://bob-report";
+    const bobScore = 7000;
+    const bobSeed = 456n;
+    const bobResultHash = await commitReveal.hashReviewReveal(1, bob.address, bobScore, bobReportHash, bobReportURI);
+    await commitReveal.connect(bob).commitReview(1, bobResultHash, bobSeed, vrfProof);
 
     let [reviewCommitters, revealedReviewers] = await infoReader.requestParticipants(1);
-    expect(reviewCommitters).to.deep.equal([alice.address]);
+    expect(reviewCommitters).to.deep.equal([alice.address, bob.address]);
     expect(revealedReviewers).to.deep.equal([]);
 
     let submission = await infoReader.reviewSubmission(1, alice.address);
@@ -535,14 +546,15 @@ describe("PROPOSAL parity modules", function () {
     expect(submission.revealed).to.equal(false);
 
     await commitReveal.connect(alice).revealReview(1, score, reportHash, reportURI, seed);
+    await commitReveal.connect(bob).revealReview(1, bobScore, bobReportHash, bobReportURI, bobSeed);
 
     [reviewCommitters, revealedReviewers] = await infoReader.requestParticipants(1);
-    expect(reviewCommitters).to.deep.equal([alice.address]);
-    expect(revealedReviewers).to.deep.equal([alice.address]);
+    expect(reviewCommitters).to.deep.equal([alice.address, bob.address]);
+    expect(revealedReviewers).to.deep.equal([alice.address, bob.address]);
 
     requestInfo = await infoReader.requestInfo(1);
-    expect(requestInfo.reviewCommitCount).to.equal(1n);
-    expect(requestInfo.reviewRevealCount).to.equal(1n);
+    expect(requestInfo.reviewCommitCount).to.equal(2n);
+    expect(requestInfo.reviewRevealCount).to.equal(2n);
 
     submission = await infoReader.reviewSubmission(1, alice.address);
     expect(submission.revealed).to.equal(true);

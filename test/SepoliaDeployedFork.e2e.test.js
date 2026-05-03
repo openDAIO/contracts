@@ -32,7 +32,7 @@ function fastConfig() {
     reviewRevealQuorum: 2,
     auditCommitQuorum: 2,
     auditRevealQuorum: 2,
-    auditTargetLimit: 2,
+    auditTargetLimit: 1,
     minIncomingAudit: 1,
     auditCoverageQuorum: 7000,
     contributionThreshold: 1000,

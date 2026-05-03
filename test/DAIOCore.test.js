@@ -12,6 +12,7 @@ const QUEUED = 1n;
 const REVIEW_COMMIT = 2n;
 const REVIEW_REVEAL = 3n;
 const AUDIT_COMMIT = 4n;
+const AUDIT_REVEAL = 5n;
 const UNRESOLVED = 9n;
 const CANCELLED = 7n;
 const SCALE = 10000n;
@@ -20,7 +21,6 @@ const ROUND_AUDIT_CONSENSUS = 1;
 const ROUND_REPUTATION_FINAL = 2;
 const ELECTION_DIFFICULTY = 5000n;
 const REVIEW_SORTITION = ethers.id("DAIO_REVIEW_SORTITION");
-const AUDIT_SORTITION = ethers.id("DAIO_AUDIT_SORTITION");
 
 function tierConfig({
   reviewCommitQuorum,
@@ -47,7 +47,7 @@ function tierConfig({
 }) {
   return {
     reviewElectionDifficulty: Number(ELECTION_DIFFICULTY),
-    auditElectionDifficulty: Number(ELECTION_DIFFICULTY),
+    auditElectionDifficulty: Number(SCALE),
     reviewCommitQuorum,
     reviewRevealQuorum,
     auditCommitQuorum,
@@ -163,7 +163,7 @@ describe("DAIOCore", function () {
         reviewRevealQuorum: 2,
         auditCommitQuorum: 2,
         auditRevealQuorum: 2,
-        auditTargetLimit: 2,
+        auditTargetLimit: 1,
         minIncomingAudit: 1,
         auditCoverageQuorum: 7000,
         contributionThreshold: 1000,
@@ -188,8 +188,8 @@ describe("DAIOCore", function () {
         reviewRevealQuorum: 2,
         auditCommitQuorum: 2,
         auditRevealQuorum: 2,
-        auditTargetLimit: 3,
-        minIncomingAudit: 2,
+        auditTargetLimit: 1,
+        minIncomingAudit: 1,
         auditCoverageQuorum: 8000,
         contributionThreshold: 1500,
         reviewEpochSize: 50,
@@ -213,8 +213,8 @@ describe("DAIOCore", function () {
         reviewRevealQuorum: 2,
         auditCommitQuorum: 2,
         auditRevealQuorum: 2,
-        auditTargetLimit: 2,
-        minIncomingAudit: 3,
+        auditTargetLimit: 1,
+        minIncomingAudit: 1,
         auditCoverageQuorum: 10000,
         contributionThreshold: 1000,
         reviewEpochSize: 25,
@@ -342,7 +342,6 @@ describe("DAIOCore", function () {
   async function findReviewPairForCurrentPhase(fixture, requestId, reviewers, finalityFactor = 2n, requireNewFrom = undefined) {
     const lifecycle = await fixture.core.getRequestLifecycle(requestId);
     const reviewPhaseStartedBlock = BigInt(await ethers.provider.getBlockNumber());
-    const auditPhaseStartedBlock = reviewPhaseStartedBlock + 4n;
 
     for (let i = 0; i < reviewers.length; i++) {
       for (let j = 0; j < reviewers.length; j++) {
@@ -373,37 +372,12 @@ describe("DAIOCore", function () {
         );
         if (!secondReviewPass) continue;
 
-        const firstAuditPass = await sortitionPass(
-          fixture,
-          requestId,
-          AUDIT_SORTITION,
-          lifecycle.auditEpoch,
-          first,
-          second,
-          auditPhaseStartedBlock,
-          finalityFactor
-        );
-        if (!firstAuditPass) continue;
-
-        const secondAuditPass = await sortitionPass(
-          fixture,
-          requestId,
-          AUDIT_SORTITION,
-          lifecycle.auditEpoch,
-          second,
-          first,
-          auditPhaseStartedBlock,
-          finalityFactor
-        );
-        if (
-          secondAuditPass
-            && (!requireNewFrom || !requireNewFrom.has(first.address) || !requireNewFrom.has(second.address))
-        ) {
+        if (!requireNewFrom || !requireNewFrom.has(first.address) || !requireNewFrom.has(second.address)) {
           return [first, second];
         }
       }
     }
-    throw new Error("No reviewer pair passes review and audit sortition in this phase");
+    throw new Error("No reviewer pair passes review sortition in this phase");
   }
 
   async function findNonSelectedReviewer(fixture, requestId, reviewers, finalityFactor = 2n) {
@@ -443,12 +417,8 @@ describe("DAIOCore", function () {
     await commitReveal.connect(reviewer).commitReview(requestId, review.resultHash, review.seed, vrfProof);
   }
 
-  function auditProofs(vrfProof, reviewerCount = 2) {
-    return Array.from({ length: reviewerCount - 1 }, () => vrfProof);
-  }
-
-  async function commitAudit(commitReveal, auditor, requestId, audit, vrfProof, reviewerCount = 2) {
-    await commitReveal.connect(auditor).commitAudit(requestId, audit.resultHash, audit.seed, auditProofs(vrfProof, reviewerCount));
+  async function commitAudit(commitReveal, auditor, requestId, audit) {
+    await commitReveal.connect(auditor).commitAudit(requestId, audit.resultHash, audit.seed, []);
   }
 
   async function enterAuditCommitWithSelectedPair(fixture, requestId) {
@@ -637,7 +607,7 @@ describe("DAIOCore", function () {
         reviewRevealQuorum: 2,
         auditCommitQuorum: 2,
         auditRevealQuorum: 2,
-        auditTargetLimit: 2,
+        auditTargetLimit: 1,
         minIncomingAudit: 1,
         auditCoverageQuorum: 7000,
         contributionThreshold: 1000,
@@ -688,6 +658,36 @@ describe("DAIOCore", function () {
     expect((await core.getRequestLifecycle(2)).status).to.equal(REVIEW_COMMIT);
   });
 
+  it("rejects non-full-audit tier configurations", async function () {
+    const { core } = await deployFixture();
+    const validConfig = tierConfig({
+      reviewCommitQuorum: 3,
+      reviewRevealQuorum: 3,
+      auditCommitQuorum: 3,
+      auditRevealQuorum: 3,
+      auditTargetLimit: 2,
+      minIncomingAudit: 2,
+      auditCoverageQuorum: 7000,
+      contributionThreshold: 1000,
+      reviewEpochSize: 25,
+      auditEpochSize: 25,
+      finalityFactor: 2,
+      maxRetries: 0,
+      protocolFaultSlashBps: 500,
+      missedRevealSlashBps: 100,
+      semanticSlashBps: 200,
+      cooldownBlocks: 100,
+      reviewCommitTimeout: 30 * 60,
+      reviewRevealTimeout: 30 * 60,
+      auditCommitTimeout: 30 * 60,
+      auditRevealTimeout: 30 * 60
+    });
+
+    await expect(core.setTierConfig(FAST, { ...validConfig, auditElectionDifficulty: 9999 })).to.be.revertedWithCustomError(core, "BadConfig");
+    await expect(core.setTierConfig(FAST, { ...validConfig, auditTargetLimit: 1 })).to.be.revertedWithCustomError(core, "BadConfig");
+    await expect(core.setTierConfig(FAST, { ...validConfig, auditCommitQuorum: 2 })).to.be.revertedWithCustomError(core, "BadConfig");
+  });
+
   it("enforces maxActiveRequests as an on-chain permissionless cap", async function () {
     const { requester, paymentRouter, core } = await deployFixture();
 
@@ -726,7 +726,7 @@ describe("DAIOCore", function () {
           auditCommitQuorum: 3,
           auditRevealQuorum: 3,
           auditTargetLimit: 2,
-          minIncomingAudit: 1,
+          minIncomingAudit: 2,
           auditCoverageQuorum: 7000,
           contributionThreshold: 1000,
           reviewEpochSize: 25,
@@ -781,7 +781,7 @@ describe("DAIOCore", function () {
           auditCommitQuorum: 4,
           auditRevealQuorum: 4,
           auditTargetLimit: 3,
-          minIncomingAudit: 1,
+          minIncomingAudit: 3,
           auditCoverageQuorum: 7000,
           contributionThreshold: 1000,
           reviewEpochSize: 25,
@@ -1095,9 +1095,36 @@ describe("DAIOCore", function () {
     const request = await core.getRequestLifecycle(requestId);
     const bobStakeAfter = (await reviewerRegistry.getReviewer(bob.address)).stake;
 
-    expect(request.status).to.equal(AUDIT_COMMIT);
+    expect(request.status).to.equal(FINALIZED);
     expect(request.lowConfidence).to.equal(true);
     expect(bobStakeAfter).to.be.lt(bobStakeBefore);
+  });
+
+  it("slashes missed audit commits and lets submitted audits continue", async function () {
+    const fixture = await deployFixture();
+    const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core, roundLedger } = fixture;
+    const requestId = await createRequest(paymentRouter, requester, FAST);
+    const { alice, bob } = await enterAuditCommitWithSelectedPair(fixture, requestId);
+
+    const aliceAudit = await buildAuditCommit(commitReveal, requestId, alice, [bob], [7000], "alice");
+    await commitAudit(commitReveal, alice, requestId, aliceAudit, vrfProof);
+
+    const bobStakeBefore = (await reviewerRegistry.getReviewer(bob.address)).stake;
+    await time.increase(30 * 60 + 1);
+    await core.handleTimeout(requestId);
+    const bobStakeAfter = (await reviewerRegistry.getReviewer(bob.address)).stake;
+
+    const request = await core.getRequestLifecycle(requestId);
+    const accounting = await roundLedger.getReviewerRoundAccounting(requestId, 0, ROUND_AUDIT_CONSENSUS, bob.address);
+    expect(request.status).to.equal(AUDIT_REVEAL);
+    expect(request.lowConfidence).to.equal(true);
+    expect(bobStakeAfter).to.be.lt(bobStakeBefore);
+    expect(accounting.protocolFault).to.equal(true);
+
+    await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
+    await time.increase(30 * 60 + 1);
+    await core.handleTimeout(requestId);
+    expect((await core.getRequestLifecycle(requestId)).status).to.equal(FINALIZED);
   });
 
   it("slashes and ignores non-canonical self-audit reveals", async function () {
@@ -1128,7 +1155,7 @@ describe("DAIOCore", function () {
     expect(request.status).to.equal(5n);
   });
 
-  it("slashes invalid target-specific audit VRF proofs without accepting the audit commit", async function () {
+  it("rejects target-specific audit VRF proofs in full-audit mode", async function () {
     const fixture = await deployFixture();
     const { requester, commitReveal, paymentRouter, reviewerRegistry, vrfProof, core } = fixture;
     const requestId = await createRequest(paymentRouter, requester, FAST);
@@ -1140,10 +1167,11 @@ describe("DAIOCore", function () {
     badProof[0] = 0n;
     const stakeBefore = (await reviewerRegistry.getReviewer(alice.address)).stake;
 
-    await commitReveal.connect(alice).commitAudit(requestId, aliceAudit.resultHash, aliceAudit.seed, [badProof]);
+    await expect(commitReveal.connect(alice).commitAudit(requestId, aliceAudit.resultHash, aliceAudit.seed, [badProof]))
+      .to.be.revertedWithCustomError(core, "InvalidAuditTarget");
 
     const stakeAfter = (await reviewerRegistry.getReviewer(alice.address)).stake;
-    expect(stakeAfter).to.be.lt(stakeBefore);
+    expect(stakeAfter).to.equal(stakeBefore);
     expect((await core.getRequestLifecycle(requestId)).status).to.equal(AUDIT_COMMIT);
   });
 
@@ -1203,12 +1231,13 @@ describe("DAIOCore", function () {
     await commitAudit(commitReveal, bob, requestId, bobAudit, vrfProof);
 
     await commitReveal.connect(alice).revealAudit(requestId, aliceAudit.targets, aliceAudit.scores, aliceAudit.seed);
-    await commitReveal.connect(bob).revealAudit(requestId, bobAudit.targets, bobAudit.scores, bobAudit.seed);
+    await time.increase(30 * 60 + 1);
+    await core.handleTimeout(requestId);
 
     const lifecycle = await core.getRequestLifecycle(requestId);
     const round1 = await roundLedger.getRoundAggregate(requestId, 0, ROUND_AUDIT_CONSENSUS);
     expect(lifecycle.status).to.equal(UNRESOLVED);
-    expect(round1.coverage).to.equal(0n);
+    expect(round1.coverage).to.equal(5000n);
   });
 
   it("excludes reviewers from eligibility after enough low long-term reputation samples", async function () {

@@ -108,23 +108,6 @@ interface IDAIORoundLedgerLike {
     function recordReward(uint256 requestId, uint256 attempt, uint8 round, address reviewer, uint256 amount) external;
 }
 
-interface IAssignmentManagerLike {
-    function verifiedCanonicalAuditTargets(
-        address vrfCoordinator,
-        uint256[2] calldata publicKey,
-        address core,
-        uint256 requestId,
-        address auditor,
-        address[] calldata revealedReviewers,
-        uint256[4][] calldata targetProofs,
-        uint256 epoch,
-        uint256 phaseStartBlock,
-        uint256 finalityFactor,
-        uint256 difficulty,
-        uint256 limit
-    ) external view returns (bool ok, address[] memory selectedTargets);
-}
-
 interface ISettlementLike {
     struct ReviewerInput {
         uint256 rewardPool;
@@ -199,7 +182,6 @@ contract DAIOCore {
     uint8 internal constant ROUND_REPUTATION_FINAL = 2;
 
     bytes32 internal constant REVIEW_SORTITION = keccak256("DAIO_REVIEW_SORTITION");
-    bytes32 internal constant AUDIT_SORTITION = keccak256("DAIO_AUDIT_SORTITION");
 
     ICommitReveal internal immutable commitReveal;
     IPriorityQueue internal immutable priorityQueue;
@@ -209,7 +191,7 @@ contract DAIOCore {
     address internal paymentRouter;
     IStakeVaultLike public stakeVault;
     IReviewerRegistryLike internal reviewerRegistry;
-    IAssignmentManagerLike internal assignmentManager;
+    address internal assignmentManager;
     IConsensusScoringLike internal consensusScoring;
     ISettlementLike internal settlement;
     IReputationLedgerLike internal reputationLedger;
@@ -437,15 +419,29 @@ contract DAIOCore {
         }
         stakeVault = IStakeVaultLike(stakeVault_);
         reviewerRegistry = IReviewerRegistryLike(reviewerRegistry_);
-        assignmentManager = IAssignmentManagerLike(assignmentManager_);
+        assignmentManager = assignmentManager_;
         consensusScoring = IConsensusScoringLike(consensusScoring_);
         settlement = ISettlementLike(settlement_);
         reputationLedger = IReputationLedgerLike(reputationLedger_);
     }
 
     function setTierConfig(ServiceTier tier, RequestConfig calldata config) external onlyOwner {
-        if (config.reviewEpochSize == 0 || config.auditEpochSize == 0) revert BadConfig();
+        _validateTierConfig(config);
         tierConfigs[uint256(tier)] = config;
+    }
+
+    function _validateTierConfig(RequestConfig calldata config) internal pure {
+        if (
+            config.reviewEpochSize == 0 || config.auditEpochSize == 0 || config.reviewElectionDifficulty > SCALE
+                || config.auditElectionDifficulty != SCALE || config.reviewRevealQuorum < 2
+                || config.reviewCommitQuorum < config.reviewRevealQuorum
+        ) revert BadConfig();
+
+        uint16 peerAuditCount = config.reviewRevealQuorum - 1;
+        if (
+            config.auditCommitQuorum != config.reviewRevealQuorum || config.auditRevealQuorum != config.reviewRevealQuorum
+                || config.auditTargetLimit != peerAuditCount || config.minIncomingAudit != peerAuditCount
+        ) revert BadConfig();
     }
 
     function createRequestFor(
@@ -627,6 +623,7 @@ contract DAIOCore {
     function _submitAuditCommit(address auditor, uint256 requestId, uint256[4][] calldata targetProofs) internal returns (bool accepted) {
         Request storage request_ = _requireStatus(requestId, RequestStatus.AuditCommit);
         if (!reviewSubmissions[requestId][auditor].revealed) revert IneligibleReviewer();
+        if (targetProofs.length != 0) revert InvalidAuditTarget();
 
         bytes32 commitHash = commitReveal.saved_commits(_auditCommitRound(requestId), auditor);
         if (commitHash == bytes32(0)) revert BadCommitment();
@@ -634,46 +631,14 @@ contract DAIOCore {
         AuditSubmission storage submission = auditSubmissions[requestId][auditor];
         if (submission.committed) revert AlreadySubmitted();
 
-        address[] storage revealedReviewers = _revealedReviewers[requestId];
-        uint256 expectedProofs = revealedReviewers.length > 0 ? revealedReviewers.length - 1 : 0;
-        if (request_.config.auditElectionDifficulty >= SCALE) {
-            if (targetProofs.length != 0) revert InvalidAuditTarget();
-        } else if (targetProofs.length != expectedProofs) {
-            revert InvalidAuditTarget();
-        }
-        uint256[2] memory publicKey = reviewerRegistry.vrfPublicKey(auditor);
-        (bool assignmentOk, address[] memory canonicalTargets) = assignmentManager.verifiedCanonicalAuditTargets(
-            address(vrfCoordinator),
-            publicKey,
-            address(this),
-            requestId,
-            auditor,
-            revealedReviewers,
-            targetProofs,
-            request_.auditEpoch,
-            request_.phaseStartedBlock,
-            request_.config.finalityFactor,
-            request_.config.auditElectionDifficulty,
-            request_.config.auditTargetLimit
-        );
-        if (!assignmentOk) {
-            _markProtocolFault(requestId, auditor, "av", request_.config.protocolFaultSlashBps);
-            return false;
-        }
-        uint256 requiredTargets = _min(request_.config.auditTargetLimit, expectedProofs);
-        if (canonicalTargets.length < requiredTargets) {
-            _handleInsufficientAuditCandidates(requestId);
-            return false;
-        }
-
-        _storeCanonicalAuditTargets(requestId, auditor, canonicalTargets);
+        if (_storeFullAuditTargets(requestId, auditor) == 0) revert InvalidAuditTarget();
 
         submission.commitHash = commitHash;
         submission.committed = true;
         reviewerRegistry.lockStake(auditor, requestId);
         request_.auditCommitCount++;
 
-        if (request_.auditCommitCount >= request_.config.auditCommitQuorum) {
+        if (request_.auditCommitCount >= _requiredAuditQuorum(request_)) {
             _advance(requestId, RequestStatus.AuditReveal);
         }
         return true;
@@ -738,7 +703,7 @@ contract DAIOCore {
         submission.revealed = true;
         request_.auditRevealCount++;
 
-        if (request_.auditRevealCount >= request_.config.auditRevealQuorum) {
+        if (request_.auditRevealCount >= _requiredAuditQuorum(request_)) {
             _finalize(requestId);
         }
     }
@@ -751,7 +716,7 @@ contract DAIOCore {
         if (_applyTimeoutIfNeeded(requestId)) return requests[requestId].status;
 
         Request storage request_ = _requireRequest(requestId);
-        if (request_.status == RequestStatus.AuditReveal && request_.auditRevealCount >= request_.config.auditRevealQuorum) {
+        if (request_.status == RequestStatus.AuditReveal && request_.auditRevealCount >= _requiredAuditQuorum(request_)) {
             _finalize(requestId);
         }
         return requests[requestId].status;
@@ -780,26 +745,34 @@ contract DAIOCore {
             } else {
                 request_.lowConfidence = true;
                 _snapshotRound0(requestId, false);
-                _advance(requestId, RequestStatus.AuditCommit);
+                if (_requiredAuditQuorum(request_) == 0) {
+                    _advance(requestId, RequestStatus.AuditReveal);
+                    _finalize(requestId);
+                } else {
+                    _advance(requestId, RequestStatus.AuditCommit);
+                }
             }
             return true;
         }
 
         if (request_.status == RequestStatus.AuditCommit) {
-            if (request_.tier == ServiceTier.Critical && request_.auditCommitCount < request_.config.auditCommitQuorum && _canRetry(request_)) {
+            _slashMissingAuditCommits(requestId);
+            uint256 requiredAuditQuorum = _requiredAuditQuorum(request_);
+            if (request_.tier == ServiceTier.Critical && request_.auditCommitCount < requiredAuditQuorum && _canRetry(request_)) {
                 _requeue(requestId);
             } else if (request_.auditCommitCount == 0 && request_.tier == ServiceTier.Critical) {
                 _fail(requestId, RequestStatus.Unresolved);
             } else {
                 request_.lowConfidence = true;
                 _advance(requestId, RequestStatus.AuditReveal);
+                if (request_.auditCommitCount == 0) _finalize(requestId);
             }
             return true;
         }
 
         if (request_.status == RequestStatus.AuditReveal) {
             _slashMissingAuditReveals(requestId);
-            if (request_.tier == ServiceTier.Critical && request_.auditRevealCount < request_.config.auditRevealQuorum && _canRetry(request_)) {
+            if (request_.tier == ServiceTier.Critical && request_.auditRevealCount < _requiredAuditQuorum(request_) && _canRetry(request_)) {
                 _requeue(requestId);
             } else {
                 request_.lowConfidence = true;
@@ -1023,8 +996,8 @@ contract DAIOCore {
                 reviewRevealCount: request_.reviewRevealCount,
                 auditRevealCount: request_.auditRevealCount,
                 reviewCommitQuorum: request_.config.reviewCommitQuorum,
-                auditCommitQuorum: request_.config.auditCommitQuorum,
-                minIncomingAudit: request_.config.minIncomingAudit,
+                auditCommitQuorum: _scoringAuditQuorum(request_),
+                minIncomingAudit: _requiredIncomingAudits(reviewerCount),
                 auditCoverageQuorum: request_.config.auditCoverageQuorum,
                 contributionThreshold: request_.config.contributionThreshold,
                 minorityThreshold: request_.config.minorityThreshold,
@@ -1219,23 +1192,42 @@ contract DAIOCore {
         }
     }
 
-    function _handleInsufficientAuditCandidates(uint256 requestId) internal {
+    function _slashMissingAuditCommits(uint256 requestId) internal {
         Request storage request_ = _requireRequest(requestId);
-        if (_canRetry(request_)) {
-            _requeue(requestId);
-        } else if (request_.tier == ServiceTier.Critical) {
-            _fail(requestId, RequestStatus.Unresolved);
-        } else {
-            request_.lowConfidence = true;
+        if (_requiredAuditQuorum(request_) == 0) return;
+
+        address[] storage reviewers_ = _revealedReviewers[requestId];
+        for (uint256 i = 0; i < reviewers_.length; i++) {
+            address auditor = reviewers_[i];
+            if (!auditSubmissions[requestId][auditor].committed) {
+                _markProtocolFault(requestId, auditor, "mc", request_.config.missedRevealSlashBps);
+            }
         }
     }
 
-    function _storeCanonicalAuditTargets(uint256 requestId, address auditor, address[] memory targets) internal {
+    function _storeFullAuditTargets(uint256 requestId, address auditor) internal returns (uint256 targetCount) {
         delete _canonicalTargetsByAuditor[requestId][auditor];
-        for (uint256 i = 0; i < targets.length; i++) {
-            canonicalAuditTargets[requestId][auditor][targets[i]] = true;
-            _canonicalTargetsByAuditor[requestId][auditor].push(targets[i]);
+        address[] storage reviewers_ = _revealedReviewers[requestId];
+        for (uint256 i = 0; i < reviewers_.length; i++) {
+            address target = reviewers_[i];
+            if (target == auditor) continue;
+            canonicalAuditTargets[requestId][auditor][target] = true;
+            _canonicalTargetsByAuditor[requestId][auditor].push(target);
+            targetCount++;
         }
+    }
+
+    function _requiredAuditQuorum(Request storage request_) internal view returns (uint256) {
+        return request_.reviewRevealCount > 1 ? request_.reviewRevealCount : 0;
+    }
+
+    function _scoringAuditQuorum(Request storage request_) internal view returns (uint256) {
+        uint256 quorum = _requiredAuditQuorum(request_);
+        return quorum == 0 ? 1 : quorum;
+    }
+
+    function _requiredIncomingAudits(uint256 reviewerCount) internal pure returns (uint256) {
+        return reviewerCount > 1 ? reviewerCount - 1 : 0;
     }
 
     function _markProtocolFault(uint256 requestId, address reviewerAddress, string memory reason, uint256 slashBps) internal {
@@ -1369,10 +1361,6 @@ contract DAIOCore {
             if (reviewers_[i] == target) return i;
         }
         revert InvalidAuditTarget();
-    }
-
-    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a < b ? a : b;
     }
 
 }

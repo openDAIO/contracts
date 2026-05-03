@@ -63,6 +63,18 @@ Auto-convert profile: reused the previous USDAIO token and Uniswap v4 hook so th
 | Standard audit target limit | `3` |
 | Critical audit target limit | `4` |
 
+## Source Default Audit Flow
+
+The source defaults for the next deployment now enforce full-audit only. Audit VRF target selection is disabled: every reviewer who reveals a review must audit every other revealed reviewer, and audit target proofs are rejected.
+
+| Tier | Review quorum | Audit obligation | Retry |
+| --- | --- | --- | --- |
+| Fast | `3` | each revealed reviewer audits `2` peers | `1` |
+| Standard | `4` | each revealed reviewer audits `3` peers | `1` |
+| Critical | `5` | each revealed reviewer audits `4` peers | `2` |
+
+`setTierConfig` rejects non-full-audit settings: `auditElectionDifficulty` must be `10000`, audit commit/reveal quorum must equal review reveal quorum, and audit target/min-incoming counts must equal `reviewRevealQuorum - 1`. The Sepolia deployment above must be redeployed before it uses this source flow.
+
 ENS and ERC-8004 metadata are optional for participation. Reviewers can register without ENS or ERC-8004 agent IDs. If they provide those fields, the configured verifier/adapter validates them. Internal scoring and Round 2 reputation weights use `ReputationLedger`; ERC-8004 is an external mirror and optional identity source.
 
 Reviewer stake management:
@@ -147,8 +159,8 @@ The Sepolia deployment was tested through Hardhat forks.
 
 | Test | Result | Notes |
 | --- | --- | --- |
-| Compile with `OPTIMIZER_RUNS=10` | Passed | `DAIOCore` runtime bytecode: `24535 bytes`. |
-| Full default Hardhat suite | `37 passing`, `3 pending` | Pending tests are opt-in fork suites. |
+| Compile with `OPTIMIZER_RUNS=10` | Passed | `DAIOCore` runtime bytecode: `24186 bytes`. |
+| Full default Hardhat suite | `39 passing`, `3 pending` | Pending tests are opt-in fork suites. |
 | Deployed-address Sepolia fork E2E | `2 passing` | Verified reused USDAIO/hook wiring and ran request -> review -> audit -> round ledger -> accounting finalization on a local fork. |
 | Generated-wallet Sepolia fork E2E | Passed | Used the configured requester, relayer, and registered reviewer agents against the deployed addresses on a local fork. |
 | Official Sepolia integration fork E2E | `1 passing` | Publicnode lacked historical state for this test; dRPC succeeded. |
