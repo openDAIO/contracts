@@ -282,6 +282,8 @@ describe("PROPOSAL parity modules", function () {
 
     const reviewer = await reviewerRegistry.getReviewer(alice.address);
     expect(reviewer.registered).to.equal(true);
+    expect(reviewer.ensNode).to.equal(node);
+    expect(reviewer.ensName).to.equal("alice.daio.eth");
   });
 
   it("keeps ENS and ERC-8004 optional for reviewer registration", async function () {
@@ -312,6 +314,8 @@ describe("PROPOSAL parity modules", function () {
     const reviewer = await reviewerRegistry.getReviewer(bob.address);
     expect(reviewer.registered).to.equal(true);
     expect(reviewer.agentId_).to.equal(0n);
+    expect(reviewer.ensNode).to.equal(ethers.ZeroHash);
+    expect(reviewer.ensName).to.equal("");
 
     await usdaio.connect(alice).mint(alice.address, stake);
     await usdaio.connect(alice).approve(await stakeVault.getAddress(), stake);

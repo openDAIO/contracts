@@ -185,7 +185,9 @@ interface IReviewerRegistryLike {
             uint256 completedRequests,
             uint256 semanticStrikes,
             uint256 protocolFaults,
-            uint256 cooldownUntilBlock
+            uint256 cooldownUntilBlock,
+            bytes32 ensNode,
+            string memory ensName
         );
 }
 

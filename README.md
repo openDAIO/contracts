@@ -10,26 +10,26 @@ Auto-convert profile: reused the previous USDAIO token and Uniswap v4 hook so th
 
 | Contract | Address | Role |
 | --- | --- | --- |
-| `DAIOCore` | `0x9E6ae12333bDDA51D2cB402B2CE8c62c7238fA00` | Main request lifecycle contract. Creates queued requests through `PaymentRouter`, starts active requests, enforces phase transitions, records final outcomes, and coordinates scoring, settlement, slashing, and retries. |
-| `PaymentRouter` | `0x2BD2611b4835307D223B1fD0d7C39eed1752C024` | Payment entry point. Pulls USDAIO, funds `StakeVault`, creates requests through `DAIOCore`, tracks each requester latest request, supports relayed EIP-712 request intents, and routes ETH/ERC20 auto-conversion flows. |
+| `DAIOCore` | `0x2cC3b1223C4C9F74d2C120F768954EE2E9BA439B` | Main request lifecycle contract. Creates queued requests through `PaymentRouter`, starts active requests, enforces phase transitions, records final outcomes, and coordinates scoring, settlement, slashing, and retries. |
+| `PaymentRouter` | `0xf3AC3b4f5135aAcd65538ec3e2d307a0d574De52` | Payment entry point. Pulls USDAIO, funds `StakeVault`, creates requests through `DAIOCore`, tracks each requester latest request, supports relayed EIP-712 request intents, and routes ETH/ERC20 auto-conversion flows. |
 | `USDAIO` | `0xbfd961809993e88D34235eDB0bCE1cD13a3ebAac` | Reused test payment token for request fees, rewards, reviewer stakes, and v4 liquidity. On this test deployment, anyone can mint USDAIO. |
-| `StakeVault` | `0x696353b3C6d0a28caeB03f81e45a689E1748b046` | Escrows request fees and reviewer stakes. Pays rewards, refunds requesters, and applies slashes authorized by core/registry flow. |
-| `ReviewerRegistry` | `0x2ffd200ad63495BB0a48DA1884dFc89885e921F6` | Reviewer registration, stake accounting, eligibility checks, optional ENS/ERC-8004 checks, cooldowns, and protocol/semantic fault tracking. |
-| `AssignmentManager` | `0x3a49B0841d0d3E5CF7d568DEF8dc5C76737a4c1b` | Assignment helper module used by the core review/audit workflow. |
-| `ConsensusScoring` | `0x4a227FbD317Bd63167856d329D671b119D34aC67` | BlockFlow-like consensus scoring module for audit-backed reviewer contribution, reliability, coverage, and weighted score computation. |
-| `Settlement` | `0xf1b391EA8f186cabC14661d435598c6575a37c2D` | Computes reviewer reward and slash outcomes from final reviewer contributions and protocol/semantic fault state. |
-| `ReputationLedger` | `0x0285faDEa91a8972866FB2C7629d052634334293` | Internal DAIO reputation source. Stores report quality, audit reliability, final contribution, and protocol compliance; Round 2 final weighting uses this ledger. |
-| `DAIORoundLedger` | `0xEdFbf97a651a7A7dd6107104023DbAA793Df8bf5` | Persistent round score and accounting history by `requestId`, `attempt`, `round`, and reviewer address. |
-| `DAIOCommitRevealManager` | `0xC4E4334450c14ec84cb584cF0E3C31C5Dd9c7c72` | Commit/reveal wrapper used by reviewers and auditors. It gates commit/reveal calls and records accepted participants. |
-| `DAIOPriorityQueue` | `0x7FabFAfb2a7Af863c78210BC7d30C50068fC1447` | Core-controlled request priority queue. Requests with higher priority fees are started first. |
-| `FRAINVRFVerifier` | `0x95cCA6fBe796AE57CB90FD7c64559090EE1C752A` | FRAIN VRF proof verifier. |
-| `DAIOVRFCoordinator` | `0x48EC5F1faa38B0ce6aDCFBe19761c5Af16fdd72A` | Builds DAIO-specific VRF messages and randomness for reviewer/auditor sortition. |
-| `AcceptedTokenRegistry` | `0x3B141D644aD985798fBe838AcA7CB66DD586E60C` | Registry of accepted payment tokens and whether each token requires swap-to-USDAIO. |
-| `ENSVerifier` | `0x3A3B10FD7A3cAF8D25A5Eef0Bb085BD980a71FE6` | Optional ENS identity verifier. If a reviewer submits ENS metadata, it checks that the ENS record resolves to the reviewer or agent wallet. |
-| `ERC8004Adapter` | `0xfFCc3C0205A6466623304bACa384d255e7C56814` | Optional ERC-8004 adapter. Verifies agent wallet authorization and mirrors DAIO reputation signals to the ERC-8004 reputation registry when available. |
-| `UniswapV4SwapAdapter` | `0xE36F87DC3448d4f473af15E605A613A9eC0c6f5E` | Adapter used by `PaymentRouter` to call the Universal Router for exact-output USDAIO swaps. |
+| `StakeVault` | `0x4053280d54a6C51750cE2dC0Bd8F26e86A758672` | Escrows request fees and reviewer stakes. Pays rewards, refunds requesters, and applies slashes authorized by core/registry flow. |
+| `ReviewerRegistry` | `0x02B15a4FB2bE5021A98B2965d84e869a2056607E` | Reviewer registration, stake accounting, eligibility checks, optional ENS/ERC-8004 checks, cooldowns, and protocol/semantic fault tracking. |
+| `AssignmentManager` | `0x233b2676138Fb3a426Aa45b4576bD50e8C7f31b0` | Assignment helper module used by the core review/audit workflow. |
+| `ConsensusScoring` | `0x022570FCA8E9995e0feE157ab7dAE1b1ebB864c9` | BlockFlow-like consensus scoring module for audit-backed reviewer contribution, reliability, coverage, and weighted score computation. |
+| `Settlement` | `0x22654F6f648bF0a6fF6e2884fD11c0F2cE7bD66a` | Computes reviewer reward and slash outcomes from final reviewer contributions and protocol/semantic fault state. |
+| `ReputationLedger` | `0x6265576Cb22d751a97DC6c4bd9a28DDe6f097d4b` | Internal DAIO reputation source. Stores report quality, audit reliability, final contribution, and protocol compliance; Round 2 final weighting uses this ledger. |
+| `DAIORoundLedger` | `0xe7cFe62AA199ea12De728aF1200c6F1467a4d9cB` | Persistent round score and accounting history by `requestId`, `attempt`, `round`, and reviewer address. |
+| `DAIOCommitRevealManager` | `0x457f51523D008E7a00505D06ac431a98840C9B9b` | Commit/reveal wrapper used by reviewers and auditors. It gates commit/reveal calls and records accepted participants. |
+| `DAIOPriorityQueue` | `0xe7f03154D3cB9D975C7e338E31D774Dd58F9caf5` | Core-controlled request priority queue. Requests with higher priority fees are started first. |
+| `FRAINVRFVerifier` | `0xedB25f39d6f64BEeB3d6847F3936e1eDa04f64C1` | FRAIN VRF proof verifier. |
+| `DAIOVRFCoordinator` | `0x0F099E96307cF195D21472289BC72A5e3fabE38a` | Builds DAIO-specific VRF messages and randomness for reviewer/auditor sortition. |
+| `AcceptedTokenRegistry` | `0xBC003Ed699Dd78250325d46a61e87fC6B531e90a` | Registry of accepted payment tokens and whether each token requires swap-to-USDAIO. |
+| `ENSVerifier` | `0x2DE705A955DA2Da119C228dFF3c8402B1a860df1` | Optional ENS identity verifier. If a reviewer submits ENS metadata, it checks that the ENS record resolves to the reviewer or agent wallet. |
+| `ERC8004Adapter` | `0x88A835551db08b78868b0F193cFe3440D9659410` | Optional ERC-8004 adapter. Verifies agent wallet authorization and mirrors DAIO reputation signals to the ERC-8004 reputation registry when available. |
+| `UniswapV4SwapAdapter` | `0xdC94BBf4a09e69405d14e1b35Db01A3D4Efd8A15` | Adapter used by `PaymentRouter` to call the Universal Router for exact-output USDAIO swaps. |
 | `DAIOAutoConvertHook` | `0xc34f2d0a9D6c768479682d8c3aB114a4a4e00040` | Reused Uniswap v4 `afterSwap` hook. Validates that an allowed swap route produced enough USDAIO for a registered payment intent. |
-| `DAIOInfoReader` | `0x8Ff175d951e4EA56Fa552312E3B29e239ed426a6` | Read-only helper for protocol overview, request state, participant data, and round/accounting views. |
+| `DAIOInfoReader` | `0x514758063D1f699AfCB234a9ed74689E191dDfc1` | Read-only helper for protocol overview, request state, participant data, and round/accounting views. |
 
 ## External Sepolia Integrations
 
@@ -50,7 +50,8 @@ Auto-convert profile: reused the previous USDAIO token and Uniswap v4 hook so th
 | Base request fee | `100 USDAIO` |
 | `maxActiveRequests` | `2` |
 | Expected reviewer count | `5` |
-| Review election difficulty | `10000 / 10000` |
+| Fast review election difficulty | `8000 / 10000` |
+| Standard/Critical review election difficulty | `10000 / 10000` |
 | Audit election difficulty | `10000 / 10000` |
 | Fast timeout per phase | `10 minutes` |
 | Standard timeout per phase | `30 minutes` |
@@ -95,6 +96,7 @@ Important view surfaces include:
 - `DAIOInfoReader.incomingAuditors(requestId, target)`
 - `DAIOInfoReader.reviewerResult(requestId, reviewer)`
 - `DAIOCore.getRequestLifecycle(requestId)`
+- `ReviewerRegistry.getReviewer(reviewer)` including stored ENS node/name metadata
 - `ReviewerRegistry.getReviewers()`
 - `ReviewerRegistry.reviewerCount()`
 - `ReviewerRegistry.reviewerAt(index)`
