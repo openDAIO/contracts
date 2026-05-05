@@ -51,9 +51,9 @@ function expectTruthy(value, label) {
 }
 
 function tierExpectations(tier) {
-  if (tier === FAST) return { reviewElectionDifficulty: 8000n, reviewRevealQuorum: 3n, auditTargetLimit: 2n, maxRetries: 1n, timeout: 10n * 60n };
+  if (tier === FAST) return { reviewElectionDifficulty: SCALE, reviewRevealQuorum: 3n, auditTargetLimit: 2n, maxRetries: 1n, timeout: 10n * 60n };
   if (tier === STANDARD) return { reviewElectionDifficulty: SCALE, reviewRevealQuorum: 4n, auditTargetLimit: 3n, maxRetries: 1n, timeout: 30n * 60n };
-  return { reviewElectionDifficulty: SCALE, reviewRevealQuorum: 5n, auditTargetLimit: 4n, maxRetries: 2n, timeout: 60n * 60n };
+  return { reviewElectionDifficulty: SCALE, reviewRevealQuorum: 4n, auditTargetLimit: 3n, maxRetries: 2n, timeout: 60n * 60n };
 }
 
 async function main() {

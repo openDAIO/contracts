@@ -200,7 +200,7 @@ The current deployed review election difficulty depends on service tier:
 
 | Tier | Review election difficulty | Selection probability |
 | --- | --- | --- |
-| Fast | `8000 / 10000` | `80%` |
+| Fast | `10000 / 10000` | `100%` |
 | Standard | `10000 / 10000` | `100%` |
 | Critical | `10000 / 10000` | `100%` |
 
@@ -226,12 +226,12 @@ Current deploy defaults:
 
 | Parameter | Fast | Standard | Critical |
 | --- | --- | --- | --- |
-| `reviewElectionDifficulty` | `8000` | `10000` | `10000` |
+| `reviewElectionDifficulty` | `10000` | `10000` | `10000` |
 | `auditElectionDifficulty` | `10000` | `10000` | `10000` |
-| Review commit/reveal quorum | `3` | `4` | `5` |
-| Audit commit/reveal quorum | `3` | `4` | `5` |
-| `auditTargetLimit` | `2` | `3` | `4` |
-| `minIncomingAudit` | `2` | `3` | `4` |
+| Review commit/reveal quorum | `3` | `4` | `4` |
+| Audit commit/reveal quorum | `3` | `4` | `4` |
+| `auditTargetLimit` | `2` | `3` | `3` |
+| `minIncomingAudit` | `2` | `3` | `3` |
 | `auditCoverageQuorum` | `7000` | `8000` | `10000` |
 | `contributionThreshold` | `1000` | `1500` | `2000` |
 | Review/audit epoch size | `25` | `50` | `100` |
@@ -765,9 +765,9 @@ Current deployment defaults:
 
 | Tier | Review selection probability | Review and audit quorum |
 | --- | --- | --- |
-| Fast | `80%` | `3` |
+| Fast | `100%` | `3` |
 | Standard | `100%` | `4` |
-| Critical | `100%` | `5` |
+| Critical | `100%` | `4` |
 
 Audit uses full-audit among revealed reviewers, so audit difficulty is fixed at `100%` and audit quorum follows review reveal quorum.
 
@@ -868,8 +868,8 @@ DAIO contracts should be implemented with these rules:
 6. The Uniswap v4 hook validates payment swaps, not request creation.
 7. Requests enter a priority-fee queue.
 8. Reviewer selection uses BRAIN-style VRF probabilistic sortition.
-9. Default review selection probability is 80% for Fast and 100% for Standard/Critical.
-10. Default review and audit quorums are 3, 4, and 5 for Fast, Standard, and Critical.
+9. Default review selection probability is 100% for Fast, Standard, and Critical.
+10. Default review and audit quorums are 3, 4, and 4 for Fast, Standard, and Critical.
 11. Once commit quorum is reached, the review committee is fixed.
 12. Once reveal quorum is reached, the request advances to audit.
 13. Audit targets are deterministic full-audit peer targets among revealed reviewers.

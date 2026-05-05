@@ -73,7 +73,7 @@ function vrfPublicKey(privateKey) {
 
 function fastTierConfig() {
   return {
-    reviewElectionDifficulty: 8000,
+    reviewElectionDifficulty: 10000,
     auditElectionDifficulty: 10000,
     reviewCommitQuorum: 3,
     reviewRevealQuorum: 3,

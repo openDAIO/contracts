@@ -52,11 +52,11 @@ Finalized at block: `10779946`
 
 | Setting | Fast | Standard | Critical |
 | --- | --- | --- | --- |
-| Review election difficulty | `8000 / 10000` | `10000 / 10000` | `10000 / 10000` |
+| Review election difficulty | `10000 / 10000` | `10000 / 10000` | `10000 / 10000` |
 | Audit election difficulty | `10000 / 10000` | `10000 / 10000` | `10000 / 10000` |
-| Review quorum | `3` | `4` | `5` |
-| Audit quorum | `3` | `4` | `5` |
-| Audit obligation | each revealed reviewer audits `2` peers | each revealed reviewer audits `3` peers | each revealed reviewer audits `4` peers |
+| Review quorum | `3` | `4` | `4` |
+| Audit quorum | `3` | `4` | `4` |
+| Audit obligation | each revealed reviewer audits `2` peers | each revealed reviewer audits `3` peers | each revealed reviewer audits `3` peers |
 | Retry count | `1` | `1` | `2` |
 | Timeout per phase | `10 minutes` | `30 minutes` | `1 hour` |
 

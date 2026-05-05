@@ -338,9 +338,9 @@ contract DAIOSystemDeployer {
             deployed.reputationLedger
         );
         IDAIOCoreDeployerTarget(deployed.core).setRoundLedger(deployed.roundLedger);
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(8000, 3, 7000, 1000, 25, 25, 2, 1, 100, 10 minutes));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(0, _tierConfig(10000, 3, 7000, 1000, 25, 25, 2, 1, 100, 10 minutes));
         IDAIOCoreDeployerTarget(deployed.core).setTierConfig(1, _tierConfig(10000, 4, 8000, 1500, 50, 50, 3, 1, 300, 30 minutes));
-        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(2, _tierConfig(10000, 5, 10000, 2000, 100, 100, 5, 2, 900, 1 hours));
+        IDAIOCoreDeployerTarget(deployed.core).setTierConfig(2, _tierConfig(10000, 4, 10000, 2000, 100, 100, 5, 2, 900, 1 hours));
         IDAIOCoreDeployerTarget(deployed.core).setPaymentRouter(deployed.paymentRouter);
 
         ICoreLinkedDeployerTarget(deployed.roundLedger).setCore(deployed.core);

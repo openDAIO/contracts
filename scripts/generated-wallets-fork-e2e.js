@@ -314,7 +314,7 @@ async function runAttempt(env, premineBlocks) {
   const startReceipt = await startTx.wait();
   console.log("request.started", startReceipt.blockNumber);
   const lifecycleAfterStart = await contracts.core.getRequestLifecycle(requestId);
-  const config = { finalityFactor: 2, reviewDifficulty: 8000n };
+  const config = { finalityFactor: 2, reviewDifficulty: 10000n };
   const reviewPhaseStartedBlock = BigInt(startReceipt.blockNumber);
   const selected = [];
   for (const agent of agents) {
